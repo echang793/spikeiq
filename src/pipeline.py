@@ -215,6 +215,7 @@ def analyze(sdir: Path) -> dict:
     import metrics as metrics_mod
     import rating as rating_mod
     import feedback as feedback_mod
+    import review as review_mod
     import quality as quality_mod
     import rotation as rotation_mod
     import rallies as rallies_mod
@@ -225,7 +226,11 @@ def analyze(sdir: Path) -> dict:
     meta = read_json(sdir, "meta.json", {}) or {}
     info = read_json(sdir, "ingest.json", {}) or {}
     fps = float(info.get("fps", 30.0))
-    rl = load_rallies(sdir)
+    corrections = review_mod.Corrections.load(sdir)
+    all_rallies = load_rallies(sdir)
+    # rallies the user marked as not-a-rally are dropped from the analysis but
+    # kept on disk, so the decision is reversible
+    rl = [r for r in all_rallies if r.index not in corrections.deleted]
 
     # --- tracking (the expensive stage; cached in pixel space) --------------
     tracks_path = sdir / "tracks.parquet"
@@ -252,7 +257,7 @@ def analyze(sdir: Path) -> dict:
     subject_id = _resolve_subject(tracks, meta, fps)
     seed_rally = _seed_rally_index(rl, meta, fps)
     resolution = resolve_subject(tracks, rl, subject_id, seed_rally, calib, fps)
-    resolution = _apply_subject_corrections(sdir, resolution)
+    resolution = _apply_subject_corrections(resolution, corrections)
     subject_ids = resolution.ids_by_rally
     write_json(sdir, "subject_by_rally.json", resolution.as_dict())
 
@@ -284,7 +289,9 @@ def analyze(sdir: Path) -> dict:
         set_status(sdir, "contacts", "running", progress=(i + 1) / max(len(rl), 1))
         feats = contacts_mod.rally_features(r, strengths, tracks, calib, fps)
         all_features.extend(feats)
-        plays_by_rally[r.index] = grammar_mod.decode_rally(feats)
+        decoded = grammar_mod.decode_rally(feats)
+        plays_by_rally[r.index] = review_mod.apply_actions(
+            decoded, corrections, r.index)
 
     set_status(sdir, "grammar", "running")
     if all_features:
@@ -357,15 +364,13 @@ def _seed_rally_index(rallies, meta: dict, fps: float) -> int:
     return min(rallies, key=lambda r: abs(r.start - t)).index
 
 
-def _apply_subject_corrections(sdir: Path, resolution):
+def _apply_subject_corrections(resolution, corrections):
     """Overlay any corrections the user made in the review UI.
 
     A corrected rally is fact, not a proposal, so it takes full confidence and
     is never re-derived on a later run.
     """
-    corrections = read_json(sdir, "corrections.json", {}) or {}
-    for key, ids in (corrections.get("subject") or {}).items():
-        idx = int(key)
+    for idx, ids in corrections.subject.items():
         if idx in resolution.ids_by_rally:
             resolution.ids_by_rally[idx] = set(ids)
             resolution.confidence_by_rally[idx] = 1.0

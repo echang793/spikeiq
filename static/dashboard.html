@@ -59,6 +59,20 @@
            background: rgba(226, 96, 79, .09); border-radius: 8px;
            padding: 12px 14px; margin-bottom: 18px; }
   .alert strong { color: var(--bad); }
+  .rally { border: 1px solid var(--line); border-radius: 9px; padding: 12px;
+           margin-bottom: 12px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .rally.done { opacity: .5; }
+  .rally .shot { position: relative; flex: 0 0 300px; max-width: 100%; }
+  .rally .shot img { width: 100%; border-radius: 6px; display: block;
+                     cursor: crosshair; }
+  .rally .meta { flex: 1; min-width: 240px; }
+  .box { position: absolute; border: 2px solid var(--accent); border-radius: 3px;
+         pointer-events: none; }
+  .box.me { border-color: var(--good); box-shadow: 0 0 0 2px rgba(70,199,141,.3); }
+  .why { color: var(--accent); font-size: 13px; margin-bottom: 6px; }
+  .acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .acts select { font-size: 12px; padding: 3px 6px; }
+  .tag { font-size: 11px; color: var(--dim); }
   ul.plain li { padding: 5px 0; border-bottom: 1px solid var(--line); }
 </style>
 </head>
@@ -115,8 +129,26 @@
   <div id="progressBody"></div>
 </section>
 
+<section id="reviewPanel" class="hide">
+  <h2>Review <span class="muted" id="reviewCount"></span></h2>
+  <p class="muted">
+    Ordered by how much your answer would change things — the rallies the
+    pipeline is least sure about come first. Fixing the top few is usually
+    enough; you do not have to reach the bottom.
+  </p>
+  <div id="reviewBody"></div>
+  <div class="row" style="margin-top:14px">
+    <button id="reviewSave">Save and re-run</button>
+    <button id="reviewSkip" class="ghost">Back to report</button>
+    <span class="muted" id="reviewPending"></span>
+  </div>
+</section>
+
 <section id="reportPanel" class="hide">
   <h2>Report</h2>
+  <div class="row" style="margin-bottom:12px">
+    <button id="openReview" class="ghost">Review rallies</button>
+  </div>
   <div id="reportBody"></div>
 </section>
 
@@ -378,6 +410,148 @@ function showReport(s) {
       across ${(m.coverage || {}).rallies_with_winner ?? 0} scored rallies.
     </p>`;
 }
+
+// --- rally review ---------------------------------------------------------
+const ACTIONS = ["serve", "pass", "set", "attack", "block", "dig"];
+let pending = { subject: {}, actions: {}, deleted: {}, confirmed: {} };
+
+$("openReview").onclick = () => loadReview();
+$("reviewSkip").onclick = () => { hide("reviewPanel"); show("reportPanel"); };
+
+async function loadReview() {
+  const body = await (await api("/api/session/" + current + "/review")).json();
+  pending = { subject: {}, actions: {}, deleted: {}, confirmed: {} };
+  hide("reportPanel");
+  show("reviewPanel");
+  $("reviewCount").textContent = `(${body.rallies.length})`;
+  $("reviewBody").innerHTML = body.rallies.map(renderRally).join("");
+  body.rallies.forEach(r => drawBoxes(r));
+  updatePending();
+}
+
+function renderRally(r) {
+  const acts = (r.plays || []).map((p, i) => `
+    <select data-rally="${r.index}" data-slot="${i}" onchange="markAction(this)">
+      ${ACTIONS.map(a => `<option value="${a}"${a === p.action ? " selected" : ""}>${a}</option>`).join("")}
+    </select>`).join("") || `<span class="tag">no touches resolved</span>`;
+
+  return `
+  <div class="rally ${r.subject.corrected ? "done" : ""}" id="rally${r.index}">
+    <div class="shot" id="shot${r.index}">
+      <img src="${BASE}/api/session/${current}/thumb/${r.index}"
+           onclick="pickSubject(event, ${r.index})" loading="lazy" alt="">
+    </div>
+    <div class="meta">
+      <div><strong>Rally ${r.index + 1}</strong>
+        <span class="tag">set ${r.set_index + 1} · ${r.start}s–${r.end}s
+          · ${r.winner ? r.winner + " won" : "winner unknown"}</span></div>
+      ${r.why ? `<div class="why">${esc(r.why)}</div>` : ""}
+      <div class="tag">you: ${r.subject.ids.length
+          ? "track " + r.subject.ids.join(", ") : "not found"}
+        · ${esc(r.subject.method)} · ${pct(r.subject.confidence)}</div>
+      <div class="tag">Click yourself on the frame to correct it.</div>
+      <div class="acts">${acts}</div>
+      <div class="row" style="margin-top:8px;gap:8px">
+        <button onclick="confirmRally(${r.index})" id="ok${r.index}"
+                class="${r.confirmed ? "" : "ghost"}">
+          ${r.confirmed ? "Looks right ✓" : "Looks right"}</button>
+        <button class="ghost" onclick="toggleDeleted(${r.index})"
+                id="del${r.index}">${r.deleted ? "Not a rally ✓" : "Not a rally"}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function drawBoxes(r) {
+  const shot = $("shot" + r.index);
+  const img = shot.querySelector("img");
+  const paint = () => {
+    shot.querySelectorAll(".box").forEach(b => b.remove());
+    const sx = img.clientWidth / (img.naturalWidth || 1);
+    const sy = img.clientHeight / (img.naturalHeight || 1);
+    (r.candidates || []).forEach(c => {
+      const d = document.createElement("div");
+      d.className = "box" + (r.subject.ids.includes(c.track_id) ? " me" : "");
+      d.style.left = (c.box[0] * sx) + "px";
+      d.style.top = (c.box[1] * sy) + "px";
+      d.style.width = ((c.box[2] - c.box[0]) * sx) + "px";
+      d.style.height = ((c.box[3] - c.box[1]) * sy) + "px";
+      shot.appendChild(d);
+    });
+  };
+  img.complete ? paint() : img.addEventListener("load", paint);
+  img._repaint = paint;
+  img._data = r;
+}
+
+window.pickSubject = (e, index) => {
+  const img = e.target;
+  const r = img._data;
+  const rect = img.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (img.naturalWidth / rect.width);
+  const y = (e.clientY - rect.top) * (img.naturalHeight / rect.height);
+  // nearest candidate box centre — turning a click back into a track id is
+  // exactly why the payload carries the boxes
+  let best = null, bestD = Infinity;
+  (r.candidates || []).forEach(c => {
+    const cx = (c.box[0] + c.box[2]) / 2, cy = (c.box[1] + c.box[3]) / 2;
+    const d = Math.hypot(cx - x, cy - y);
+    if (d < bestD) { best = c; bestD = d; }
+  });
+  if (!best) return;
+  pending.subject[index] = [best.track_id];
+  r.subject.ids = [best.track_id];
+  img._repaint();
+  $("rally" + index).classList.add("done");
+  updatePending();
+};
+
+window.markAction = el => {
+  const rally = el.dataset.rally, slot = el.dataset.slot;
+  pending.actions[rally] = pending.actions[rally] || {};
+  pending.actions[rally][slot] = el.value;
+  updatePending();
+};
+
+window.confirmRally = index => {
+  // an explicit "this was right" is what gives the accuracy harness a
+  // denominator — an uncorrected contact is otherwise indistinguishable from
+  // one nobody looked at
+  const now = !pending.confirmed[index];
+  pending.confirmed[index] = now;
+  const b = $("ok" + index);
+  b.textContent = now ? "Looks right ✓" : "Looks right";
+  b.classList.toggle("ghost", !now);
+  $("rally" + index).classList.toggle("done", now);
+  updatePending();
+};
+
+window.toggleDeleted = index => {
+  const now = !pending.deleted[index];
+  pending.deleted[index] = now;
+  $("del" + index).textContent = now ? "Not a rally ✓" : "Not a rally";
+  updatePending();
+};
+
+function updatePending() {
+  const n = Object.keys(pending.subject).length
+    + Object.values(pending.actions).reduce((a, o) => a + Object.keys(o).length, 0)
+    + Object.values(pending.deleted).filter(Boolean).length
+    + Object.values(pending.confirmed).filter(Boolean).length;
+  $("reviewPending").textContent = n ? `${n} correction${n === 1 ? "" : "s"} pending` : "";
+  $("reviewSave").disabled = n === 0;
+}
+
+$("reviewSave").onclick = async () => {
+  $("reviewSave").disabled = true;
+  await api("/api/session/" + current + "/review", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(pending),
+  });
+  hide("reviewPanel");
+  poll();
+};
 
 loadSessions();
 setInterval(loadSessions, 8000);

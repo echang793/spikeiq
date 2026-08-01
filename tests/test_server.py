@@ -152,6 +152,67 @@ def test_clip_404s_for_a_rally_that_does_not_exist(client, clip):
     assert client.get(f"/api/session/{sid}/clip/42").status_code == 404
 
 
+def test_review_lists_rallies_worst_first(client, clip):
+    sid = upload(client, clip).json()["session"]
+    sdir = pipeline.DATA / sid
+    pipeline.write_json(sdir, "ingest.json", {"fps": 30.0})
+    pipeline.write_json(sdir, "rallies.json", [
+        {"index": 0, "start": 0.0, "end": 8.0, "contacts": [1.0],
+         "winner": "near", "set_index": 0},
+        {"index": 1, "start": 30.0, "end": 38.0, "contacts": [31.0],
+         "winner": None, "set_index": 0},
+    ])
+    pipeline.write_json(sdir, "subject_by_rally.json", {
+        "ids_by_rally": {"0": [1], "1": []},
+        "confidence_by_rally": {"0": 0.9, "1": 0.0},
+        "method_by_rally": {"0": "bridged", "1": "none"}})
+    body = client.get(f"/api/session/{sid}/review").json()
+    assert [r["index"] for r in body["rallies"]] == [1, 0]
+    assert body["rallies"][0]["why"]
+
+
+def test_review_submission_is_persisted_and_requeues_analysis(client, clip):
+    sid = upload(client, clip).json()["session"]
+    sdir = pipeline.DATA / sid
+    (sdir / "calibration.json").write_text(
+        json.dumps({"corners_px": [[0, 0], [10, 0], [10, 10], [0, 10]],
+                    "attack_px": None}))
+    r = client.post(f"/api/session/{sid}/review", json={
+        "subject": {"3": [42]},
+        "actions": {"3": {"1": "block"}},
+        "deleted": {"5": True}})
+    assert r.status_code == 200
+    saved = json.loads((sdir / "corrections.json").read_text())
+    assert saved["subject"] == {"3": [42]}
+    assert saved["actions"] == {"3": {"1": "block"}}
+    assert saved["deleted"] == [5]
+
+
+def test_review_does_not_discard_the_expensive_tracking(client, clip):
+    """A correction must cost seconds. Clearing derived data the way
+    calibration does would throw away the hour-long stage."""
+    sid = upload(client, clip).json()["session"]
+    sdir = pipeline.DATA / sid
+    (sdir / "tracks.parquet").write_bytes(b"x")
+    client.post(f"/api/session/{sid}/review", json={"subject": {"1": [2]}})
+    assert (sdir / "tracks.parquet").exists()
+
+
+def test_review_corrections_accumulate_across_submissions(client, clip):
+    sid = upload(client, clip).json()["session"]
+    sdir = pipeline.DATA / sid
+    client.post(f"/api/session/{sid}/review", json={"subject": {"1": [2]}})
+    client.post(f"/api/session/{sid}/review", json={"subject": {"4": [9]}})
+    saved = json.loads((sdir / "corrections.json").read_text())
+    assert saved["subject"] == {"1": [2], "4": [9]}
+
+
+def test_thumb_404s_for_an_unknown_rally(client, clip):
+    sid = upload(client, clip).json()["session"]
+    pipeline.write_json(pipeline.DATA / sid, "rallies.json", [])
+    assert client.get(f"/api/session/{sid}/thumb/3").status_code == 404
+
+
 def test_trend_skips_sessions_with_no_rating(client, clip):
     a = upload(client, clip).json()["session"]
     b = upload(client, clip).json()["session"]

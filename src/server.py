@@ -204,6 +204,77 @@ def plays(sid: str):
     return read_json(_sdir(sid), "plays.json", {})
 
 
+# --- rally review ----------------------------------------------------------
+
+@app.get("/api/session/{sid}/review")
+def review(sid: str):
+    """Rallies to check, worst first, so 20 minutes lands where it matters."""
+    import pandas as pd
+    import review as review_mod
+
+    sdir = _sdir(sid)
+    info = read_json(sdir, "ingest.json", {}) or {}
+    plays_raw = read_json(sdir, "plays.json", {}) or {}
+    plays = {int(k): v for k, v in plays_raw.items()}
+    tracks_path = sdir / "tracks.parquet"
+    tracks = pd.read_parquet(tracks_path) if tracks_path.exists() else None
+    return review_mod.review_payload(
+        rallies=pipeline.load_rallies(sdir),
+        plays_by_rally=plays,
+        subject=read_json(sdir, "subject_by_rally.json", {}) or {},
+        tracks=tracks,
+        fps=float(info.get("fps", 30.0)),
+        corrections=review_mod.Corrections.load(sdir),
+    )
+
+
+class ReviewPatch(BaseModel):
+    subject: dict[str, list[int] | None] | None = None
+    actions: dict[str, dict[str, str | None]] | None = None
+    deleted: dict[str, bool] | None = None
+    confirmed: dict[str, bool] | None = None
+    reanalyze: bool = True
+
+
+@app.post("/api/session/{sid}/review")
+def submit_review(sid: str, body: ReviewPatch):
+    """Record corrections and re-run everything below tracking.
+
+    Deliberately does NOT clear derived artifacts the way calibration does:
+    `analyze` rewrites them all anyway, and tracks.parquet is what makes this
+    a seconds-long job rather than an hour-long one.
+    """
+    import review as review_mod
+
+    sdir = _sdir(sid)
+    corrections = review_mod.Corrections.load(sdir).merge(body.model_dump())
+    corrections.save(sdir)
+    if body.reanalyze and (sdir / "calibration.json").exists():
+        pipeline.enqueue(sdir, "analyze")
+    return {"ok": True, "queued": body.reanalyze}
+
+
+@app.get("/api/session/{sid}/thumb/{index}")
+def thumb(sid: str, index: int):
+    """One frame per rally, cut lazily and cached — a match has a hundred."""
+    sdir = _sdir(sid)
+    rallies = read_json(sdir, "rallies.json", []) or []
+    match = next((r for r in rallies if r["index"] == index), None)
+    if match is None:
+        raise HTTPException(404, "no such rally")
+    thumbs = sdir / "thumbs"
+    thumbs.mkdir(exist_ok=True)
+    out = thumbs / f"rally{index:03d}.jpg"
+    if not out.exists():
+        contacts = match.get("contacts") or []
+        t = (contacts[0] + 0.3) if contacts else match["start"] + 0.5
+        try:
+            pipeline.extract_frame(sdir, t, name=f"thumbs/rally{index:03d}.jpg")
+        except RuntimeError as exc:
+            raise HTTPException(500, str(exc)) from exc
+    return FileResponse(out, media_type="image/jpeg")
+
+
 @app.get("/api/progress")
 def progress():
     running = []
