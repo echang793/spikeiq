@@ -83,8 +83,20 @@ def rally_role(rally, subject: pd.DataFrame, calib, fps: float) -> RallyRole:
     )
 
 
-def rally_roles(rallies, subject: pd.DataFrame, calib, fps: float) -> list[RallyRole]:
-    return [rally_role(r, subject, calib, fps) for r in rallies]
+def rally_roles(rallies, tracks: pd.DataFrame, ids_by_rally: dict[int, set[int]],
+                calib, fps: float) -> list[RallyRole]:
+    """One role per rally, each read from that rally's own subject track ids.
+
+    The ids differ from rally to rally — the tracker does not keep one id for a
+    player across a dead ball — so a single subject frame set would only
+    describe whichever rally it came from.
+    """
+    out = []
+    for r in rallies:
+        ids = ids_by_rally.get(r.index, set())
+        seg = tracks[tracks["track_id"].isin(ids)] if ids else tracks.iloc[0:0]
+        out.append(rally_role(r, seg, calib, fps))
+    return out
 
 
 def back_row_attack(role: RallyRole, contact_y: float) -> bool:

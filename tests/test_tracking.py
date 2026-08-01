@@ -12,16 +12,46 @@ def test_wanted_frames_without_windows_is_every_stride():
 
 
 def test_wanted_frames_restricted_to_rally_windows():
-    # 30 fps, keep only 1.0-2.0 s => frames 30..60
-    got = wanted_frames(300, 30.0, 2, [(1.0, 2.0)])
+    # 30 fps, keep only 1.0-2.0 s => frames 30..60, plus bridge samples
+    got = wanted_frames(300, 30.0, 2, [(1.0, 2.0)], bridge_fps=None)
     assert got.min() == 30 and got.max() == 60
     assert all(f % 2 == 0 for f in got.tolist())
 
 
 def test_wanted_frames_skips_dead_time_between_rallies():
-    got = set(wanted_frames(600, 30.0, 1, [(0.0, 1.0), (5.0, 6.0)]).tolist())
+    got = set(wanted_frames(600, 30.0, 1, [(0.0, 1.0), (5.0, 6.0)],
+                            bridge_fps=None).tolist())
     assert 15 in got and 165 in got
     assert 90 not in got  # 3.0 s — between the two rallies
+
+
+def test_bridge_frames_sample_the_dead_ball_sparsely():
+    """Dead time is sampled, not skipped: without these frames the subject's
+    identity cannot survive to the next rally. Sparse enough to stay cheap."""
+    dense = wanted_frames(3000, 30.0, 2, [(0.0, 1.0)], bridge_fps=2.0)
+    sparse_only = [f for f in dense.tolist() if f > 60]
+    assert sparse_only, "dead ball was skipped entirely"
+    gaps = set(np.diff(sparse_only).tolist())
+    assert len(gaps) == 1, f"uneven bridge spacing: {gaps}"
+    spacing = gaps.pop()
+    assert 30.0 / spacing == pytest.approx(2.0, abs=0.3)   # ~2 fps
+
+
+def test_bridging_costs_a_small_fraction_of_full_tracking():
+    """The whole point is that identity survives for a modest surcharge, not
+    that we track the dead ball properly."""
+    windows = [(t, t + 8.0) for t in range(10, 300, 30)]
+    rallies_only = len(wanted_frames(9000, 30.0, 2, windows, bridge_fps=None))
+    bridged = len(wanted_frames(9000, 30.0, 2, windows, bridge_fps=2.0))
+    assert 1.0 < bridged / rallies_only < 1.5
+
+
+def test_bridge_gap_allowance_exceeds_the_bridge_spacing():
+    """A stitching allowance smaller than the sample spacing guarantees the
+    chain snaps at the first dead ball — the original bug."""
+    from tracking import bridge_gap_frames
+    assert bridge_gap_frames(30.0, 2.0) > 30.0 / 2.0
+    assert bridge_gap_frames(60.0, 2.0) > 60.0 / 2.0
 
 
 def test_feet_px_is_bottom_centre(make_tracks):

@@ -55,6 +55,10 @@
   .dot.me { background: var(--good); }
   .hide { display: none; }
   ul.plain { list-style: none; padding: 0; margin: 0; }
+  .alert { border: 1px solid var(--bad); border-left-width: 4px;
+           background: rgba(226, 96, 79, .09); border-radius: 8px;
+           padding: 12px 14px; margin-bottom: 18px; }
+  .alert strong { color: var(--bad); }
   ul.plain li { padding: 5px 0; border-bottom: 1px solid var(--line); }
 </style>
 </head>
@@ -309,7 +313,18 @@ function showReport(s) {
   const jm = (s.jumps || {}).summary || {};
   const mv = m.movement || {};
 
+  const q = s.quality || {};
+  // the headline is just the first failure, so listing both reads as an echo
+  const banner = (q.usable === false) ? `
+    <div class="alert">
+      <strong>This analysis did not work well enough to grade you.</strong>
+      <ul class="plain" style="margin-top:8px">
+        ${(q.failures || []).map(f => `<li>${esc(f.message)}</li>`).join("")}
+      </ul>
+    </div>` : "";
+
   $("reportBody").innerHTML = `
+    ${banner}
     <div class="row" style="align-items:center;gap:22px">
       <div><div class="band">${esc(r.band || "—")}</div>
            <div class="muted">level ${r.level ?? "—"}</div></div>

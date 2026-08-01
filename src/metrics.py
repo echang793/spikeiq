@@ -30,8 +30,25 @@ MIN_SAMPLE = {          # below these, a rate is reported but marked low-sample
 }
 
 
-def subject_plays(plays: list[dict], subject_ids: set[int]) -> list[dict]:
-    return [p for p in plays if p["track_id"] in subject_ids]
+SubjectIds = "dict[int, set[int]] | set[int]"
+
+
+def ids_for(subject_ids, rally_index: int) -> set[int]:
+    """The subject's track ids during one rally.
+
+    Accepts either a per-rally mapping — which is what the pipeline produces,
+    because the tracker gives him different ids in different rallies — or a
+    single set meaning "the same ids all match", which is the simple case and
+    what most tests use.
+    """
+    if isinstance(subject_ids, dict):
+        return subject_ids.get(rally_index, set())
+    return subject_ids
+
+
+def subject_plays(plays: list[dict], subject_ids, rally_index: int = 0) -> list[dict]:
+    ids = ids_for(subject_ids, rally_index)
+    return [p for p in plays if p["track_id"] in ids]
 
 
 def _last_contact(plays: list[dict]) -> dict | None:
@@ -128,7 +145,7 @@ def _rate(num: int, den: int) -> float | None:
 
 
 def skill_lines(rallies, plays_by_rally: dict[int, list[dict]],
-                subject_ids: set[int], rally_indices: list[int] | None = None) -> dict:
+                subject_ids, rally_indices: list[int] | None = None) -> dict:
     """Aggregate every skill over a chosen set of rallies."""
     wanted = set(rally_indices) if rally_indices is not None else None
     acc = defaultdict(int)
@@ -139,8 +156,9 @@ def skill_lines(rallies, plays_by_rally: dict[int, list[dict]],
             continue
         plays = plays_by_rally.get(rally.index, [])
         winner = rally.winner
+        mine = ids_for(subject_ids, rally.index)
         for i, p in enumerate(plays):
-            if p["track_id"] not in subject_ids:
+            if p["track_id"] not in mine:
                 continue
             action = p["action"]
             acc[action] += 1
@@ -254,7 +272,7 @@ def movement(positions, rallies) -> dict:
     }
 
 
-def by_role(rallies, plays_by_rally: dict[int, list[dict]], subject_ids: set[int],
+def by_role(rallies, plays_by_rally: dict[int, list[dict]], subject_ids,
             role_groups: dict[str, list[int]]) -> dict:
     """The same skill lines, computed separately for each position played."""
     return {
@@ -264,7 +282,7 @@ def by_role(rallies, plays_by_rally: dict[int, list[dict]], subject_ids: set[int
     }
 
 
-def compute(rallies, plays_by_rally: dict[int, list[dict]], subject_ids: set[int],
+def compute(rallies, plays_by_rally: dict[int, list[dict]], subject_ids,
             role_groups: dict[str, list[int]], positions=None,
             jump_summary: dict | None = None) -> dict:
     return {
@@ -275,8 +293,11 @@ def compute(rallies, plays_by_rally: dict[int, list[dict]], subject_ids: set[int
         "coverage": {
             "rallies": len(rallies),
             "rallies_with_winner": sum(1 for r in rallies if r.winner),
+            "rallies_with_subject": sum(
+                1 for r in rallies if ids_for(subject_ids, r.index)),
             "subject_touches": sum(
-                len(subject_plays(plays_by_rally.get(r.index, []), subject_ids))
+                len(subject_plays(plays_by_rally.get(r.index, []),
+                                  subject_ids, r.index))
                 for r in rallies),
         },
     }

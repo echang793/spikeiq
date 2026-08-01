@@ -12,6 +12,7 @@ Ported from dinkiq/src/tracking.py, with two volleyball-driven changes:
    spends its time on (`assign_sides`).
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -36,12 +37,25 @@ COLUMNS = (["frame", "track_id", "x1", "y1", "x2", "y2", "conf"]
 
 TRACK_STRIDE = 2  # process every 2nd frame; 1 = accuracy mode
 
+# Sparse frames sampled BETWEEN rallies, purely to keep player identity alive
+# across the dead ball. Skipping dead time entirely is what made the subject
+# unresolvable after rally one: twenty seconds later, six identically-dressed
+# teammates have all moved, and position alone cannot say which one is him.
+# At this rate players move a metre or two between samples, which ordinary
+# proximity tracking handles, so identity survives the gap for about a fifth
+# more tracking time.
+BRIDGE_FPS = 2.0
+
 
 def wanted_frames(n_frames: int, fps: float, stride: int,
-                  windows: list[tuple[float, float]] | None) -> np.ndarray:
-    """Frame indices to run inference on: every `stride`-th frame that falls
-    inside one of the (start, end) second-windows. `windows=None` means the
-    whole video (used before rallies are known, and by the tests).
+                  windows: list[tuple[float, float]] | None,
+                  bridge_fps: float | None = BRIDGE_FPS) -> np.ndarray:
+    """Frame indices to run inference on.
+
+    Every `stride`-th frame inside a rally window, plus a sparse trickle of
+    frames outside them (`bridge_fps`) so tracks survive the dead ball.
+    `windows=None` means the whole video. `bridge_fps=None` disables bridging,
+    which is the old behaviour and is kept for benchmarking the cost.
     """
     idx = np.arange(0, n_frames, stride)
     if not windows:
@@ -50,7 +64,25 @@ def wanted_frames(n_frames: int, fps: float, stride: int,
     keep = np.zeros(len(idx), dtype=bool)
     for start, end in windows:
         keep |= (t >= start) & (t <= end)
+    if bridge_fps:
+        # snap the bridge interval to a whole number of strides, so the samples
+        # land on the stride grid and come out evenly spaced
+        every = max(1, int(round(fps / bridge_fps / stride)))
+        bridge = np.zeros(len(idx), dtype=bool)
+        bridge[::every] = True
+        keep |= bridge
     return idx[keep]
+
+
+def bridge_gap_frames(fps: float, bridge_fps: float = BRIDGE_FPS) -> int:
+    """Frame gap the subject may vanish for once bridging is on.
+
+    Derived from the bridge rate rather than a constant: with samples every
+    `fps / bridge_fps` frames, a stitching allowance smaller than that spacing
+    guarantees the chain breaks at the first dead ball, which is the bug this
+    replaces.
+    """
+    return int(round(fps / max(bridge_fps, 1e-6) * 2.5))
 
 
 def run_tracking(video: Path, out_parquet: Path, models_dir: Path,
@@ -230,6 +262,257 @@ def assign_sides(df: pd.DataFrame, calib: CourtCalibration) -> dict[int, str]:
         ys = pts[keep, 1]
         sides[int(tid)] = "far" if float(np.mean(ys < NET_Y)) >= 0.5 else "near"
     return sides
+
+
+# --- subject identity across a whole match ---------------------------------
+
+MAX_REANCHOR_M = 9.0      # a player cannot be anywhere but their own half
+MIN_MARGIN_M = 1.5        # runner-up this close means we genuinely do not know
+MIN_RALLY_FRAMES = 4
+# Proximity across the dead ball is capped low on purpose. Twenty seconds is
+# long enough for two teammates to swap places, and when they do, "nearest to
+# where he was" is not merely uncertain — it is confidently wrong, and there is
+# no signal in position alone that can tell the two cases apart. Bridging is the
+# real answer; this is a hint for the review UI to confirm, never an assertion.
+PROXIMITY_MAX_CONF = 0.45
+
+
+@dataclass
+class SubjectResolution:
+    """Per-rally identity, with an explicit confidence for each rally.
+
+    Confidence matters more here than anywhere else in the pipeline. Bridging
+    (see BRIDGE_FPS) makes identity reliable when tracking held through the dead
+    ball, but when it did not, the fallback is proximity among six teammates in
+    matching jerseys — which is genuinely weak, and says so rather than
+    pretending. Low-confidence rallies are what the review UI puts in front of
+    the user first.
+    """
+    ids_by_rally: dict[int, set[int]]
+    confidence_by_rally: dict[int, float]
+    method_by_rally: dict[int, str]      # 'bridged' | 'proximity' | 'none'
+
+    @property
+    def resolved_fraction(self) -> float:
+        if not self.ids_by_rally:
+            return 0.0
+        found = sum(1 for v in self.ids_by_rally.values() if v)
+        return found / len(self.ids_by_rally)
+
+    def as_dict(self) -> dict:
+        return {
+            "ids_by_rally": {str(k): sorted(v)
+                             for k, v in self.ids_by_rally.items()},
+            "confidence_by_rally": {str(k): round(v, 3)
+                                    for k, v in self.confidence_by_rally.items()},
+            "method_by_rally": {str(k): v for k, v in self.method_by_rally.items()},
+            "resolved_fraction": round(self.resolved_fraction, 3),
+        }
+
+
+def rally_segment(tracks: pd.DataFrame, rally, fps: float) -> pd.DataFrame:
+    f0, f1 = int(rally.start * fps), int(rally.end * fps)
+    return tracks[(tracks["frame"] >= f0) & (tracks["frame"] <= f1)]
+
+
+def _track_court_centre(g: pd.DataFrame, calib: CourtCalibration):
+    pts = calib.to_court(feet_px(g))
+    keep = np.array([on_court(x, y) for x, y in pts])
+    if not keep.any():
+        return None
+    return np.median(pts[keep], axis=0)
+
+
+def _side_of(point) -> str:
+    return "far" if point[1] < NET_Y else "near"
+
+
+def _candidates(seg: pd.DataFrame, calib: CourtCalibration,
+                anchor_side: str | None) -> dict[int, np.ndarray]:
+    out: dict[int, np.ndarray] = {}
+    for tid, g in seg.groupby("track_id"):
+        if len(g) < MIN_RALLY_FRAMES:
+            continue
+        centre = _track_court_centre(g, calib)
+        if centre is None:
+            continue
+        # players do not swap ends mid-set, so an opponent is never him
+        if anchor_side is not None and _side_of(centre) != anchor_side:
+            continue
+        out[int(tid)] = centre
+    return out
+
+
+def resolve_subject(tracks: pd.DataFrame, rallies, seed_id: int, seed_rally: int,
+                    calib: CourtCalibration, fps: float) -> SubjectResolution:
+    """Follow the subject across every rally of the match.
+
+    Two mechanisms, in order of trustworthiness:
+
+    1. **Bridged.** If tracking sampled the dead ball (`BRIDGE_FPS`), the ordinary
+       within-match stitch already reaches into the next rally and identity is
+       simply carried. This is the reliable path and the reason bridging exists.
+    2. **Proximity.** Otherwise, pick the nearest track on the subject's own half
+       to where he was last seen. With six teammates in the same jersey this is
+       weak by construction; it reports low confidence, and reports *nothing*
+       when the runner-up is nearly as close.
+
+    Walks outward from the rally the user actually clicked on, in both
+    directions, and keeps going after a rally it cannot resolve — losing him for
+    one rally must not end the match.
+    """
+    by_index = {r.index: r for r in rallies}
+    order = sorted(by_index)
+    if seed_rally not in by_index and order:
+        seed_rally = order[0]
+
+    ids: dict[int, set[int]] = {i: set() for i in order}
+    conf: dict[int, float] = {i: 0.0 for i in order}
+    method: dict[int, str] = {i: "none" for i in order}
+    if not order:
+        return SubjectResolution(ids, conf, method)
+
+    max_gap = bridge_gap_frames(fps)
+    # one whole-match stitch: when bridge frames exist this alone spans the
+    # match, and each rally reads its slice out of the chain. What counts as
+    # evidence is the chain having FRAMES inside a rally, not merely sharing a
+    # track id with it — an id that happens to recur after the dead ball proves
+    # nothing about whether it is still the same person.
+    chain = None
+    if seed_id in set(tracks["track_id"].unique().tolist()):
+        try:
+            chain = stitch_subject(tracks, seed_id, max_gap=max_gap)
+        except ValueError:
+            chain = None
+
+    anchor = None
+    anchor_side = None
+    seed_pos = order.index(seed_rally)
+    for direction in (1, -1):
+        cursor = anchor
+        cursor_side = anchor_side
+        steps = order[seed_pos:] if direction == 1 else order[seed_pos::-1]
+        for idx in steps:
+            seg = rally_segment(tracks, by_index[idx], fps)
+            found = _bridged_ids(chain, by_index[idx], by_index[seed_rally],
+                                 fps, max_gap)
+            if idx == seed_rally and seed_id in set(seg["track_id"]):
+                ids[idx] = _expand_within_rally(seg, {seed_id})
+                conf[idx] = 1.0
+                method[idx] = "clicked"
+            elif found:
+                ids[idx] = _expand_within_rally(seg, found)
+                conf[idx] = 0.9
+                method[idx] = "bridged"
+            else:
+                picked, c = _nearest_candidate(seg, calib, cursor, cursor_side)
+                if picked is not None:
+                    ids[idx] = _expand_within_rally(seg, {picked})
+                    conf[idx] = c
+                    method[idx] = "proximity"
+            if ids[idx]:
+                centre = _track_court_centre(
+                    seg[seg["track_id"].isin(ids[idx])], calib)
+                if centre is not None:
+                    cursor = centre
+                    cursor_side = _side_of(centre)
+            if idx == seed_rally:
+                anchor, anchor_side = cursor, cursor_side
+    return SubjectResolution(ids, conf, method)
+
+
+def continuous_blocks(frames: np.ndarray, max_gap: int) -> list[tuple[int, int]]:
+    """Split a frame sequence wherever it jumps by more than `max_gap`.
+
+    A track id reappearing after the dead ball is not evidence that it is still
+    the same person — trackers recycle ids, and a chain filtered by id alone
+    looks continuous across a gap it never actually crossed. Only an unbroken
+    run of frames proves identity survived, so bridging is decided on these
+    blocks rather than on id membership.
+    """
+    if len(frames) == 0:
+        return []
+    f = np.sort(np.asarray(frames))
+    breaks = np.flatnonzero(np.diff(f) > max_gap)
+    starts = np.concatenate([[f[0]], f[breaks + 1]])
+    ends = np.concatenate([f[breaks], [f[-1]]])
+    return list(zip(starts.tolist(), ends.tolist()))
+
+
+def _bridged_ids(chain, rally, seed_rally, fps: float,
+                 max_gap: int) -> set[int]:
+    """Ids from the chain that reached this rally WITHOUT crossing a break.
+
+    Empty when tracking did not survive the dead ball between here and the
+    rally the user clicked on, which is the honest answer and hands the rally
+    to the proximity fallback (and then to the review UI).
+    """
+    if chain is None or chain.empty:
+        return set()
+    blocks = continuous_blocks(chain["frame"].to_numpy(), max_gap)
+    seed_f0, seed_f1 = int(seed_rally.start * fps), int(seed_rally.end * fps)
+    f0, f1 = int(rally.start * fps), int(rally.end * fps)
+
+    def overlaps(block, a, b):
+        return block[0] <= b and block[1] >= a
+
+    live = [b for b in blocks if overlaps(b, seed_f0, seed_f1)]
+    if not any(overlaps(b, f0, f1) for b in live):
+        return set()
+    inside = rally_segment(chain, rally, fps)
+    return set(inside["track_id"].unique().tolist())
+
+
+def _expand_within_rally(seg: pd.DataFrame, seed_ids: set[int]) -> set[int]:
+    """Grow a set of ids into the full chain WITHIN one rally.
+
+    Fragmentation inside a rally is a solved problem — `stitch_subject` handles
+    it — and re-anchoring across rallies must not replace that.
+    """
+    out: set[int] = set()
+    for sid in seed_ids:
+        try:
+            out |= stitch_chain_ids(seg, sid)
+        except ValueError:
+            out.add(sid)
+    return out
+
+
+def _nearest_candidate(seg: pd.DataFrame, calib: CourtCalibration,
+                       anchor, anchor_side) -> tuple[int | None, float]:
+    if anchor is None or seg.empty:
+        return None, 0.0
+    cands = _candidates(seg, calib, anchor_side)
+    if not cands:
+        return None, 0.0
+    ranked = sorted(((float(np.hypot(*(c - anchor))), tid)
+                     for tid, c in cands.items()))
+    best_d, best_id = ranked[0]
+    if best_d > MAX_REANCHOR_M:
+        return None, 0.0
+    if len(ranked) > 1:
+        gap = ranked[1][0] - best_d
+        # two players equally close: any pick would be a coin flip, and a coin
+        # flip here credits someone else's touches to him
+        if gap < MIN_MARGIN_M:
+            return None, 0.0
+        margin = min(1.0, gap / (2 * MIN_MARGIN_M))
+    else:
+        margin = 1.0
+    closeness = 1.0 - min(best_d / MAX_REANCHOR_M, 1.0)
+    # more plausible teammates on his half means less to go on, whatever the
+    # nearest one happens to be
+    crowding = 1.0 / (1.0 + 0.35 * (len(ranked) - 1))
+    score = PROXIMITY_MAX_CONF * crowding * (0.5 * closeness + 0.5 * margin)
+    return best_id, round(score, 3)
+
+
+def resolve_subject_by_rally(tracks: pd.DataFrame, rallies, seed_id: int,
+                             seed_rally: int, calib: CourtCalibration,
+                             fps: float) -> dict[int, set[int]]:
+    """Just the ids, for callers that do not need the confidence breakdown."""
+    return resolve_subject(tracks, rallies, seed_id, seed_rally,
+                           calib, fps).ids_by_rally
 
 
 def subject_court_positions(df: pd.DataFrame, subject_id: int,

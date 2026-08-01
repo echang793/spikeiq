@@ -113,27 +113,94 @@ def test_behind_endline_flags_both_serving_ends():
     assert not behind_endline(ContactFeatures(**base, y=14.0))
 
 
+def ctx_for(rows, fps=30.0, start=0.0, end=10.0):
+    from contacts import RallyTracks
+    from rallies import Rally
+    return RallyTracks(frame_of(rows), Rally(0, start, end), fps)
+
+
+def at_court(calib, x, y, **kw):
+    """pose_row placed at a given court position."""
+    import cv2
+    px = cv2.perspectiveTransform(
+        np.array([[[x, y]]], dtype=np.float32), np.linalg.inv(calib.H)).reshape(2)
+    return dict(cx=float(px[0]), feet_y=float(px[1]), **kw)
+
+
 def test_attribute_contact_picks_the_player_whose_hands_move_fastest():
     rows = []
     for f in range(0, 20):
         rows.append(pose_row(f, 1, cx=400.0))                 # standing still
         rows.append(pose_row(f, 2, cx=800.0, wrist_dx=20.0 + 25.0 * f))  # swinging
-    assert attribute_contact(0.33, frame_of(rows), fps=30.0) == 2
+    tid, conf = attribute_contact(0.33, ctx_for(rows), calib=None)
+    assert tid == 2
+    assert 0.0 < conf <= 1.0
 
 
 def test_attribute_contact_returns_none_when_nobody_is_tracked():
     rows = [pose_row(f, 1, cx=400.0) for f in range(5)]
-    assert attribute_contact(50.0, frame_of(rows), fps=30.0) is None
+    assert attribute_contact(50.0, ctx_for(rows), calib=None)[0] is None
+
+
+def test_the_ball_cannot_reach_a_player_it_had_no_time_to_reach(calib):
+    """The P0 case: a player on the far side swings hardest at the moment of a
+    touch that happened by the near net, 0.15 s after the previous one. Hand
+    speed alone would hand him the touch — and because the decoder treats the
+    attributed side as fact, that one error corrupts the whole rally's
+    possession sequence."""
+    rows = []
+    for f in range(0, 12):
+        rows.append(pose_row(f, 1, **at_court(calib, 4.5, 10.0),
+                             wrist_dx=20.0 + 8.0 * f))     # near net, moderate
+        rows.append(pose_row(f, 2, **at_court(calib, 4.5, 2.0),
+                             wrist_dx=20.0 + 40.0 * f))    # far court, wild
+    ctx = ctx_for(rows)
+    prev = np.array([4.5, 11.0])                            # last touch near net
+
+    unconstrained, _ = attribute_contact(0.15, ctx, calib)
+    constrained, _ = attribute_contact(0.15, ctx, calib, prev_court=prev,
+                                       prev_t=0.0)
+    assert unconstrained == 2, "fixture should favour the far player on speed"
+    assert constrained == 1, "ball had 0.15 s — it cannot have crossed the court"
+
+
+def test_a_reachable_far_player_is_still_allowed(calib):
+    """The constraint rules out the impossible, not the merely distant: given
+    two full seconds the ball can cross the whole court."""
+    rows = []
+    for f in range(0, 12):
+        rows.append(pose_row(f, 1, **at_court(calib, 4.5, 10.0),
+                             wrist_dx=20.0 + 8.0 * f))
+        rows.append(pose_row(f, 2, **at_court(calib, 4.5, 2.0),
+                             wrist_dx=20.0 + 40.0 * f))
+    ctx = ctx_for(rows)
+    tid, _ = attribute_contact(0.15, ctx, calib,
+                               prev_court=np.array([4.5, 11.0]), prev_t=-2.0)
+    assert tid == 2
+
+
+def test_attribution_confidence_falls_when_two_players_are_equally_likely(calib):
+    rows = []
+    for f in range(0, 12):
+        rows.append(pose_row(f, 1, **at_court(calib, 3.5, 10.0),
+                             wrist_dx=20.0 + 20.0 * f))
+        rows.append(pose_row(f, 2, **at_court(calib, 5.5, 10.0),
+                             wrist_dx=20.0 + 20.0 * f))     # identical swing
+    tied = attribute_contact(0.15, ctx_for(rows), calib)[1]
+
+    rows2 = []
+    for f in range(0, 12):
+        rows2.append(pose_row(f, 1, **at_court(calib, 3.5, 10.0),
+                              wrist_dx=20.0 + 40.0 * f))
+        rows2.append(pose_row(f, 2, **at_court(calib, 5.5, 10.0)))
+    clear = attribute_contact(0.15, ctx_for(rows2), calib)[1]
+    assert tied < clear
 
 
 def test_contact_features_places_the_touch_on_the_court(calib):
-    import cv2
-    Hinv = np.linalg.inv(calib.H)
-    px = cv2.perspectiveTransform(
-        np.array([[[4.5, 14.0]]], dtype=np.float32), Hinv).reshape(2)
-    rows = [pose_row(f, 1, cx=float(px[0]), feet_y=float(px[1]),
-                     wrist_dx=20.0 + 20.0 * f) for f in range(10)]
-    f = contact_features(0.15, 0.8, frame_of(rows), calib, fps=30.0)
+    rows = [pose_row(f, 1, **at_court(calib, 4.5, 14.0), wrist_dx=20.0 + 20.0 * f)
+            for f in range(10)]
+    f = contact_features(0.15, 0.8, ctx_for(rows), calib)
     assert f is not None
     assert f.side == "near"
     assert f.x == pytest.approx(4.5, abs=0.4)
@@ -142,6 +209,35 @@ def test_contact_features_places_the_touch_on_the_court(calib):
     assert 0.0 < f.confidence <= 1.0
 
 
+def test_contact_confidence_folds_in_how_sure_the_attribution_was(calib):
+    """A perfectly clear pose belonging to the wrong body is worse than
+    useless, so attribution doubt has to reach the decoder."""
+    clear = [pose_row(f, 1, **at_court(calib, 4.5, 14.0),
+                      wrist_dx=20.0 + 40.0 * f) for f in range(10)]
+    contested = list(clear)
+    for f in range(10):
+        contested.append(pose_row(f, 2, **at_court(calib, 5.2, 14.2),
+                                  wrist_dx=20.0 + 40.0 * f))
+    a = contact_features(0.15, 0.8, ctx_for(clear), calib)
+    b = contact_features(0.15, 0.8, ctx_for(contested), calib)
+    assert b.confidence < a.confidence
+
+
 def test_contact_features_returns_none_when_unattributable(calib):
-    empty = frame_of([])
-    assert contact_features(1.0, 0.5, empty, calib, fps=30.0) is None
+    assert contact_features(1.0, 0.5, ctx_for([]), calib) is None
+
+
+def test_rally_features_threads_each_contact_into_the_next(calib):
+    """The constraint needs the previous contact, so the rally builder has to
+    carry it forward rather than treating each touch independently."""
+    from contacts import rally_features
+    from rallies import Rally
+
+    rows = []
+    for f in range(0, 60):
+        rows.append(pose_row(f, 1, **at_court(calib, 4.5, 12.0),
+                             wrist_dx=20.0 + 10.0 * (f % 12)))
+    rally = Rally(0, 0.0, 2.0, contacts=[0.2, 0.7, 1.2])
+    feats = rally_features(rally, {}, frame_of(rows), calib, 30.0)
+    assert [round(f.t, 1) for f in feats] == [0.2, 0.7, 1.2]
+    assert all(f.track_id == 1 for f in feats)

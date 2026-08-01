@@ -126,47 +126,126 @@ def airborne_series(df: pd.DataFrame) -> np.ndarray:
     return (base - y) / torso   # image y grows downward, so rising = smaller y
 
 
-def attribute_contact(t: float, tracks: pd.DataFrame, fps: float,
-                      window_s: float = HAND_WINDOW_S) -> int | None:
-    """Which track made the touch heard at time `t`.
+# A volleyball leaves a hard spike at roughly 25 m/s and slows in flight, so
+# this is a generous ceiling on how far the ball can have travelled between two
+# touches — generous on purpose, because the job is to rule out the impossible,
+# not to model the trajectory.
+BALL_MAX_SPEED = 25.0
+REACH_SLACK_M = 2.0     # homography and tracking error, plus arm's length
 
-    Chosen as the player whose hands are moving fastest around the sound. That
-    is the same corroboration idea dinkiq used, but where dinkiq only needed to
-    ask "did the subject swing?", here it has to pick one of twelve — so the
-    answer is a comparison between players, and ties or a silent field return
-    None rather than a guess.
+
+class RallyTracks:
+    """Per-rally track data with the pose derivatives computed once.
+
+    Attribution used to recompute `hand_metrics` for every track on every
+    contact, which is O(contacts x tracks) passes over the same rows.
     """
-    f_lo = int((t - window_s) * fps)
-    f_hi = int((t + window_s) * fps)
-    win = tracks[(tracks["frame"] >= f_lo) & (tracks["frame"] <= f_hi)]
-    if win.empty:
-        return None
-    best_id, best_speed = None, 0.0
-    for tid, g in win.groupby("track_id"):
-        if len(g) < 2:
+
+    def __init__(self, tracks: pd.DataFrame, rally, fps: float):
+        f0, f1 = int(rally.start * fps), int(rally.end * fps)
+        self.fps = fps
+        self.seg = tracks[(tracks["frame"] >= f0) & (tracks["frame"] <= f1)]
+        self.by_id = {int(tid): g.sort_values("frame").reset_index(drop=True)
+                      for tid, g in self.seg.groupby("track_id")}
+        self.hands = {tid: hand_metrics(g, fps) for tid, g in self.by_id.items()}
+
+    def near(self, t: float, window_s: float = HAND_WINDOW_S) -> list[int]:
+        return [tid for tid, g in self.by_id.items()
+                if ((g["frame"] / self.fps - t).abs() <= window_s).sum() >= 2]
+
+    def peak_hand_speed(self, tid: int, t: float,
+                        window_s: float = HAND_WINDOW_S) -> float:
+        hm = self.hands.get(tid)
+        if hm is None or hm.empty:
+            return float("nan")
+        win = hm[(hm["t"] >= t - window_s) & (hm["t"] <= t + window_s)]
+        if win.empty:
+            return float("nan")
+        speeds = win["hand_speed"].to_numpy()
+        # a fully occluded player has no measurable hand speed at all; that is
+        # an ordinary outcome here, not something to warn about
+        if not np.isfinite(speeds).any():
+            return float("nan")
+        return float(np.nanmax(speeds))
+
+    def court_at(self, tid: int, t: float, calib):
+        g = self.by_id.get(tid)
+        if g is None or g.empty:
+            return None
+        i = (g["frame"] / self.fps - t).abs().to_numpy().argmin()
+        return calib.to_court(feet_px(g.iloc[[i]]))[0]
+
+
+def attribute_contact(t: float, ctx: "RallyTracks", calib,
+                      prev_court=None, prev_t: float | None = None
+                      ) -> tuple[int | None, float]:
+    """Who made the touch heard at time `t`, and how sure we are.
+
+    Hand speed alone is not enough. With twelve players someone is always
+    swinging, and a player on the far side of the court could win the vote for a
+    touch they could not physically have reached — which matters more than it
+    sounds, because `grammar.decode` treats the attributed SIDE as observed fact
+    when it works out possession. One bad attribution corrupts the whole rally.
+
+    So candidates are first filtered by whether the ball could have got to them
+    at all: at 25 m/s it can only cover so much ground in the time since the
+    last touch. That needs no ball detection, only the previous contact.
+    """
+    candidates = ctx.near(t)
+    if not candidates:
+        return None, 0.0
+
+    reach = None
+    if prev_court is not None and prev_t is not None:
+        reach = BALL_MAX_SPEED * max(t - prev_t, 0.0) + REACH_SLACK_M
+
+    scored: list[tuple[float, int]] = []
+    for tid in candidates:
+        speed = ctx.peak_hand_speed(tid, t)
+        if not np.isfinite(speed):
             continue
-        hm = hand_metrics(g, fps)
-        peak = np.nanmax(hm["hand_speed"].to_numpy()) if len(hm) else np.nan
-        if np.isfinite(peak) and peak > best_speed:
-            best_id, best_speed = int(tid), float(peak)
-    return best_id
+        score = speed
+        if reach is not None:
+            pos = ctx.court_at(tid, t, calib)
+            if pos is None:
+                continue
+            travelled = float(np.hypot(*(pos - prev_court)))
+            if travelled > reach:
+                continue      # the ball could not have got there in time
+            # among reachable players, prefer the one the ball had time to reach
+            # comfortably rather than only just
+            score *= 1.0 + 0.5 * (1.0 - travelled / reach)
+        scored.append((score, tid))
+
+    if not scored:
+        return None, 0.0
+    scored.sort(reverse=True)
+    best_score, best_id = scored[0]
+    if best_score <= 0:
+        return None, 0.0
+    runner_up = scored[1][0] if len(scored) > 1 else 0.0
+    margin = 1.0 - (runner_up / best_score if best_score else 1.0)
+    confidence = round(min(1.0, 0.35 + 0.65 * margin), 3)
+    return best_id, confidence
 
 
-def contact_features(t: float, strength: float, tracks: pd.DataFrame,
-                     calib, fps: float) -> ContactFeatures | None:
-    """Full feature row for one contact, or None if no player can be attributed."""
-    tid = attribute_contact(t, tracks, fps)
+def contact_features(t: float, strength: float, ctx: "RallyTracks", calib,
+                     prev_court=None, prev_t: float | None = None
+                     ) -> ContactFeatures | None:
+    """Full feature row for one contact, or None if nobody can be attributed."""
+    tid, attribution = attribute_contact(t, ctx, calib, prev_court, prev_t)
     if tid is None:
         return None
-    g = tracks[tracks["track_id"] == tid].sort_values("frame")
-    if g.empty:
+    g = ctx.by_id.get(tid)
+    if g is None or g.empty:
         return None
 
+    fps = ctx.fps
     frame = int(round(t * fps))
     near = g.iloc[(g["frame"] - frame).abs().to_numpy().argmin()]
     court = calib.to_court(feet_px(pd.DataFrame([near])))[0]
 
-    hm = hand_metrics(g, fps)
+    hm = ctx.hands[tid]
     at = hm.iloc[(hm["frame"] - frame).abs().to_numpy().argmin()]
     air = airborne_series(g)
     air_at = float(air[(g["frame"] - frame).abs().to_numpy().argmin()])
@@ -179,7 +258,11 @@ def contact_features(t: float, strength: float, tracks: pd.DataFrame,
 
     present = [v for v in (height, at["hand_spread"], air_at, speed)
                if np.isfinite(v)]
-    confidence = len(present) / 4.0
+    pose_seen = len(present) / 4.0
+    # how much of the pose was visible AND how sure we are it is the right
+    # player — a perfectly clear pose belonging to the wrong body is worse than
+    # useless, so the two multiply rather than average
+    confidence = round(pose_seen * attribution, 4)
 
     return ContactFeatures(
         t=float(t), frame=frame, track_id=tid,
@@ -194,6 +277,28 @@ def contact_features(t: float, strength: float, tracks: pd.DataFrame,
         hand_speed=_nan_to(speed, 0.0),
         confidence=confidence,
     )
+
+
+def rally_features(rally, strengths: dict, tracks: pd.DataFrame, calib,
+                   fps: float) -> list[ContactFeatures]:
+    """Every attributable contact in one rally, in order.
+
+    Each contact is attributed using the previous one's court position, so the
+    ball-flight constraint has something to work from. The chain starts
+    unconstrained: the serve has no predecessor, and its own geometry (behind
+    the endline) identifies it anyway.
+    """
+    ctx = RallyTracks(tracks, rally, fps)
+    out: list[ContactFeatures] = []
+    prev_court, prev_t = None, None
+    for t in rally.contacts:
+        f = contact_features(t, strengths.get(round(t, 3), 0.5), ctx, calib,
+                             prev_court, prev_t)
+        if f is None:
+            continue
+        out.append(f)
+        prev_court, prev_t = np.array([f.x, f.y]), f.t
+    return out
 
 
 def _nan_to(v: float, default: float) -> float:

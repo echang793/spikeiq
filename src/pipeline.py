@@ -37,7 +37,8 @@ ANALYZE_STAGES = ["tracking", "subject", "rotation", "contacts", "grammar",
 # artifacts that depend on the court calibration and must be rebuilt when it
 # changes; tracks.parquet is deliberately NOT here — it is pure pixel space
 DERIVED = ["subject.parquet", "contacts.parquet", "rotation.json", "plays.json",
-           "jumps.json", "metrics.json", "rating.json", "feedback.json"]
+           "jumps.json", "metrics.json", "rating.json", "feedback.json",
+           "quality.json", "subject_by_rally.json"]
 
 
 def session_dir(sid: str) -> Path:
@@ -214,11 +215,11 @@ def analyze(sdir: Path) -> dict:
     import metrics as metrics_mod
     import rating as rating_mod
     import feedback as feedback_mod
+    import quality as quality_mod
     import rotation as rotation_mod
     import rallies as rallies_mod
     from court import CourtCalibration
-    from tracking import (run_tracking, stitch_chain_ids, stitch_subject,
-                          subject_court_positions)
+    from tracking import resolve_subject, run_tracking
 
     calib = CourtCalibration.load(sdir / "calibration.json")
     meta = read_json(sdir, "meta.json", {}) or {}
@@ -244,13 +245,20 @@ def analyze(sdir: Path) -> dict:
         raise RuntimeError("no players were detected — check the calibration "
                            "frame actually shows the court")
 
-    # --- subject -----------------------------------------------------------
+    # --- subject, resolved rally by rally ----------------------------------
+    # NOT once for the match: the tracker hands the same player a different id
+    # in every rally, so a single chain covers only the rally it started in.
     set_status(sdir, "subject", "running")
     subject_id = _resolve_subject(tracks, meta, fps)
-    subject_ids = stitch_chain_ids(tracks, subject_id)
-    subject = stitch_subject(tracks, subject_id)
+    seed_rally = _seed_rally_index(rl, meta, fps)
+    resolution = resolve_subject(tracks, rl, subject_id, seed_rally, calib, fps)
+    resolution = _apply_subject_corrections(sdir, resolution)
+    subject_ids = resolution.ids_by_rally
+    write_json(sdir, "subject_by_rally.json", resolution.as_dict())
+
+    subject = _subject_frames(tracks, rl, subject_ids, fps)
     subject.to_parquet(sdir / "subject.parquet", index=False)
-    positions = subject_court_positions(tracks, subject_id, calib, fps)
+    positions = _subject_positions(subject, calib, fps)
 
     # --- rally bookkeeping: who served, and therefore who won ---------------
     set_status(sdir, "rotation", "running")
@@ -259,7 +267,7 @@ def analyze(sdir: Path) -> dict:
     rallies_mod.assign_winners(rl)
     write_json(sdir, "rallies.json", [r.as_dict() for r in rl])
 
-    roles = rotation_mod.rally_roles(rl, subject, calib, fps)
+    roles = rotation_mod.rally_roles(rl, tracks, subject_ids, calib, fps)
     write_json(sdir, "rotation.json", {
         "per_rally": [r.as_dict() for r in roles],
         "summary": rotation_mod.summarise(roles),
@@ -274,12 +282,7 @@ def analyze(sdir: Path) -> dict:
     all_features = []
     for i, r in enumerate(rl):
         set_status(sdir, "contacts", "running", progress=(i + 1) / max(len(rl), 1))
-        feats = []
-        for t in r.contacts:
-            f = contacts_mod.contact_features(
-                t, strengths.get(round(t, 3), 0.5), tracks, calib, fps)
-            if f is not None:
-                feats.append(f)
+        feats = contacts_mod.rally_features(r, strengths, tracks, calib, fps)
         all_features.extend(feats)
         plays_by_rally[r.index] = grammar_mod.decode_rally(feats)
 
@@ -292,7 +295,8 @@ def analyze(sdir: Path) -> dict:
     # --- jumps -------------------------------------------------------------
     set_status(sdir, "jump", "running")
     height_m = float(meta.get("height_m") or jump_mod.DEFAULT_HEIGHT_M)
-    jumps = jump_mod.detect_jumps(subject, fps, height_m)
+    jumps = jump_mod.detect_jumps_per_rally(tracks, rl, subject_ids, fps,
+                                            height_m)
     jump_summary = jump_mod.summarise(jumps)
     write_json(sdir, "jumps.json", {"jumps": jump_mod.jumps_to_json(jumps),
                                     "summary": jump_summary,
@@ -307,8 +311,16 @@ def analyze(sdir: Path) -> dict:
     write_json(sdir, "metrics.json", m)
 
     set_status(sdir, "rating", "running")
+    q = quality_mod.assess(rl, plays_by_rally, subject_ids,
+                           audio_contacts=len(strengths),
+                           subject_touches=m["coverage"]["subject_touches"])
+    write_json(sdir, "quality.json", q.as_dict())
+
     r = rating_mod.estimate(m["overall"] | {"coverage": m["coverage"]},
                             jump_summary)
+    # a level built on four resolved rallies would be read as a level; the
+    # dimensions stay so it is still possible to see what went wrong
+    r = quality_mod.gate_rating(r, q)
     write_json(sdir, "rating.json", r)
 
     set_status(sdir, "feedback", "running")
@@ -328,6 +340,69 @@ def _resolve_subject(tracks: pd.DataFrame, meta: dict, fps: float) -> int:
     frame = int(float(meta.get("subject_click_t", 0.0)) * fps)
     return pick_subject(tracks, (float(click[0]), float(click[1])),
                         near_frame=frame)
+
+
+def _seed_rally_index(rallies, meta: dict, fps: float) -> int:
+    """The rally the user was looking at when they clicked themselves.
+
+    Re-anchoring walks outward from here in both directions, so this is the one
+    rally whose identity is known rather than inferred.
+    """
+    t = float(meta.get("subject_click_t", 0.0))
+    for r in rallies:
+        if r.start <= t <= r.end:
+            return r.index
+    if not rallies:
+        return 0
+    return min(rallies, key=lambda r: abs(r.start - t)).index
+
+
+def _apply_subject_corrections(sdir: Path, resolution):
+    """Overlay any corrections the user made in the review UI.
+
+    A corrected rally is fact, not a proposal, so it takes full confidence and
+    is never re-derived on a later run.
+    """
+    corrections = read_json(sdir, "corrections.json", {}) or {}
+    for key, ids in (corrections.get("subject") or {}).items():
+        idx = int(key)
+        if idx in resolution.ids_by_rally:
+            resolution.ids_by_rally[idx] = set(ids)
+            resolution.confidence_by_rally[idx] = 1.0
+            resolution.method_by_rally[idx] = "corrected"
+    return resolution
+
+
+def _subject_frames(tracks: pd.DataFrame, rallies, ids_by_rally: dict,
+                    fps: float) -> pd.DataFrame:
+    """The subject's rows across the whole match, taken per rally."""
+    parts = []
+    for r in rallies:
+        ids = ids_by_rally.get(r.index, set())
+        if not ids:
+            continue
+        f0, f1 = int(r.start * fps), int(r.end * fps)
+        parts.append(tracks[(tracks["track_id"].isin(ids))
+                            & (tracks["frame"] >= f0) & (tracks["frame"] <= f1)])
+    if not parts:
+        return tracks.iloc[0:0]
+    return (pd.concat(parts).sort_values("frame")
+            .drop_duplicates("frame").reset_index(drop=True))
+
+
+def _subject_positions(subject: pd.DataFrame, calib, fps: float) -> pd.DataFrame:
+    from court import on_court
+    from tracking import feet_px
+    if subject.empty:
+        return pd.DataFrame(columns=["frame", "t", "x", "y"])
+    pts = calib.to_court(feet_px(subject))
+    out = pd.DataFrame({
+        "frame": subject["frame"].to_numpy(),
+        "t": subject["frame"].to_numpy() / fps,
+        "x": pts[:, 0], "y": pts[:, 1],
+    })
+    mask = [on_court(x, y) for x, y in zip(out["x"], out["y"])]
+    return out[mask].reset_index(drop=True)
 
 
 # --- single background worker ----------------------------------------------

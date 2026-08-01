@@ -250,6 +250,31 @@ def _local_peaks(v: np.ndarray, min_value: float) -> list[int]:
     return out
 
 
+def detect_jumps_per_rally(tracks: pd.DataFrame, rallies,
+                           ids_by_rally: dict[int, set[int]], fps: float,
+                           subject_height_m: float = DEFAULT_HEIGHT_M
+                           ) -> list[Jump]:
+    """Jumps across a whole match, measured one rally at a time.
+
+    Run over the concatenated match instead, the local baseline fit would span
+    the dead ball between rallies — where the player has walked somewhere else
+    entirely — and manufacture jumps out of the discontinuity. Each rally is its
+    own measurement.
+    """
+    out: list[Jump] = []
+    for rally in rallies:
+        ids = ids_by_rally.get(rally.index, set())
+        if not ids:
+            continue
+        f0, f1 = int(rally.start * fps), int(rally.end * fps)
+        seg = tracks[(tracks["track_id"].isin(ids))
+                     & (tracks["frame"] >= f0) & (tracks["frame"] <= f1)]
+        if seg.empty:
+            continue
+        out.extend(detect_jumps(seg, fps, subject_height_m))
+    return sorted(out, key=lambda j: j.t)
+
+
 def jump_at(jumps: list[Jump], t: float, window_s: float = 0.45) -> Jump | None:
     """The jump whose peak is nearest a contact time, if there is one close by.
 

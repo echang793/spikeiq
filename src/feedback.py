@@ -130,8 +130,7 @@ def tips_for(rating: dict, metrics: dict, limit: int = 4) -> list[dict]:
     return work + keep
 
 
-def _plural(n: int, singular: str, plural: str) -> str:
-    return f"{n} {singular}" if n == 1 else f"{n} {plural}"
+from textutil import plural as _plural
 
 
 def per_role_notes(by_role: dict, min_rallies: int = 6) -> list[dict]:

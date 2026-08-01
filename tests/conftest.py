@@ -55,6 +55,54 @@ def make_tracks():
     return _make
 
 
+def px_for(calib, x: float, y: float):
+    """Court metres -> image pixels, by inverting the calibration homography."""
+    import cv2
+    import numpy as np
+    pt = np.array([[[x, y]]], dtype=np.float32)
+    return cv2.perspectiveTransform(pt, np.linalg.inv(calib.H)).reshape(2)
+
+
+@pytest.fixture
+def make_windowed_tracks(calib):
+    """Tracks with the shape `run_tracking` actually writes: frames ONLY inside
+    rally windows, so consecutive rows straddle hundreds of frames of dead ball.
+
+    Every fixture in the first version of this suite used contiguous frames, and
+    that is exactly why a bug that truncated the subject to rally one shipped
+    under a green suite. Anything that consumes `tracks.parquet` should be
+    tested against this shape, not a continuous one.
+
+    `positions` maps rally index -> {track_id: (court_x, court_y)}.
+    """
+    import pandas as pd
+
+    def _make(rallies, positions: dict, fps: float = 30.0, stride: int = 2):
+        from tracking import COLUMNS
+        rows = []
+        for rally in rallies:
+            per_track = positions.get(rally.index, {})
+            f0, f1 = int(rally.start * fps), int(rally.end * fps)
+            for frame in range(f0 - f0 % stride, f1 + 1, stride):
+                for tid, (cx, cy) in per_track.items():
+                    px, py = px_for(calib, cx, cy)
+                    rows.append(tracks_frame(frame, tid, float(px),
+                                             float(py) - 60.0, h=120.0))
+        return pd.DataFrame(rows, columns=COLUMNS)
+
+    return _make
+
+
+@pytest.fixture
+def match_rallies():
+    """Four rallies spread over a realistic match timeline, with the long dead
+    ball between them that breaks naive frame-gap stitching."""
+    from rallies import Rally
+    return [Rally(index=i, start=10.0 + i * 30.0, end=18.0 + i * 30.0,
+                  serving_side="near" if i % 2 == 0 else "far")
+            for i in range(4)]
+
+
 @pytest.fixture
 def synth_audio(tmp_path):
     """Write a WAV with narrowband whistle tones and broadband contact pops.

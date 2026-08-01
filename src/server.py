@@ -181,6 +181,8 @@ def session(sid: str):
         "rallies": read_json(sdir, "rallies.json", []),
         "calibration_frame": read_json(sdir, "calibration_frame.json", {}),
         "calibrated": (sdir / "calibration.json").exists(),
+        "quality": read_json(sdir, "quality.json", {}),
+        "subject_by_rally": read_json(sdir, "subject_by_rally.json", {}),
         "rotation": read_json(sdir, "rotation.json", {}),
         "jumps": read_json(sdir, "jumps.json", {}),
         "metrics": read_json(sdir, "metrics.json", {}),

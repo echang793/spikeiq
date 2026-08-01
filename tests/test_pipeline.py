@@ -131,6 +131,71 @@ def test_load_rallies_on_a_missing_file(sdir):
     assert load_rallies(sdir) == []
 
 
+def test_analyze_runs_the_whole_chain_below_tracking(sdir, calib, match_rallies,
+                                                     make_windowed_tracks):
+    """Drive `analyze` past tracking with a pre-built parquet, so every stage
+    below it actually executes.
+
+    Until this existed, the only test touching `analyze` died at the tracking
+    stage, so a stage-below-tracking crash — a name the formatter had quietly
+    stripped from the import line — passed a green suite and only showed up
+    when a real session was run.
+    """
+    from court import CourtCalibration
+
+    positions = {r.index: {1: (3.0 + r.index * 0.2, 13.0), 9: (4.5, 4.0)}
+                 for r in match_rallies}
+    tracks = make_windowed_tracks(match_rallies, positions)
+    tracks.to_parquet(sdir / "tracks.parquet", index=False)
+
+    write_json(sdir, "ingest.json", {"fps": 30.0, "duration": 200.0})
+    write_json(sdir, "rallies.json", [r.as_dict() for r in match_rallies])
+    write_json(sdir, "contacts_audio.json",
+               [{"t": r.start + 1.0, "strength": 0.8} for r in match_rallies])
+    for r in match_rallies:
+        r.contacts = [r.start + 1.0]
+    write_json(sdir, "rallies.json", [r.as_dict() for r in match_rallies])
+    CourtCalibration(calib.corners_px).save(sdir / "calibration.json")
+    click = [float(v) for v in
+             __import__("conftest").px_for(calib, 3.0, 13.0)]
+    write_json(sdir, "meta.json", {"subject_click": click,
+                                   "subject_click_t": match_rallies[0].start + 1.0,
+                                   "height_m": 1.83})
+
+    out = pipeline.analyze(sdir)
+    assert get_status(sdir)["stage"] == "complete"
+    assert (sdir / "subject_by_rally.json").exists()
+    assert (sdir / "quality.json").exists()
+    assert set(out) == {"metrics", "rating", "feedback"}
+
+
+def test_analyze_suppresses_the_level_on_a_thin_session(sdir, calib,
+                                                        match_rallies,
+                                                        make_windowed_tracks):
+    """Four rallies is not a match. The report must refuse to name a level
+    rather than print a confident-looking one."""
+    from court import CourtCalibration
+
+    positions = {r.index: {1: (3.0, 13.0)} for r in match_rallies}
+    make_windowed_tracks(match_rallies, positions).to_parquet(
+        sdir / "tracks.parquet", index=False)
+    write_json(sdir, "ingest.json", {"fps": 30.0, "duration": 200.0})
+    for r in match_rallies:
+        r.contacts = [r.start + 1.0]
+    write_json(sdir, "rallies.json", [r.as_dict() for r in match_rallies])
+    write_json(sdir, "contacts_audio.json",
+               [{"t": r.start + 1.0, "strength": 0.8} for r in match_rallies])
+    CourtCalibration(calib.corners_px).save(sdir / "calibration.json")
+    click = [float(v) for v in __import__("conftest").px_for(calib, 3.0, 13.0)]
+    write_json(sdir, "meta.json", {"subject_click": click,
+                                   "subject_click_t": match_rallies[0].start + 1.0})
+
+    out = pipeline.analyze(sdir)
+    assert out["rating"]["level"] is None
+    assert out["rating"]["suppressed"] is True
+    assert read_json(sdir, "quality.json")["usable"] is False
+
+
 def test_analyze_refuses_without_a_subject_click(sdir, sample_video, calib):
     from court import CourtCalibration
     (sdir / "raw.mp4").write_bytes(sample_video.read_bytes())
