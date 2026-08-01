@@ -35,8 +35,23 @@ Module map: `court` (geometry/homography) → `tracking` (YOLO + stitch) →
 
 ## Invariants
 
-- **Tracking runs only inside rally windows.** A match is ~25-30% ball-in-play;
-  tracking dead time triples cost and can only invent phantom events.
+- **Tracking runs at full stride only inside rally windows**, plus a sparse
+  ~2 fps trickle between them (`tracking.BRIDGE_FPS`). The trickle is not
+  optional: without it the subject's identity cannot survive the dead ball, and
+  every stat collapses to the first rally. Costs ~20% more tracking time.
+- **The subject is resolved per rally** (`tracking.resolve_subject`), never once
+  per match. `metrics`/`rotation`/`jump` all take `dict[rally_index, set[ids]]`.
+- **Bridging is proven by temporal continuity, not shared track ids.** A track id
+  recurring after a gap proves nothing about whether it is the same person.
+- **Proximity re-anchoring is capped at low confidence** (`PROXIMITY_MAX_CONF`).
+  Two teammates can swap places during a dead ball, and when they do, "nearest
+  to where he was" is confidently wrong with no signal able to detect it.
+- **Contact attribution is constrained by ball flight** (`BALL_MAX_SPEED`). One
+  bad attribution corrupts a whole rally, because `grammar.decode` treats the
+  attributed side as observed fact.
+- **`quality.assess` gates the report.** Below threshold the level estimate is
+  suppressed entirely. With no footage to validate against, being wrong quietly
+  is the failure that matters.
 - **`rating.RUBRIC` is the single tuning point.** Its anchors are informed
   guesses, NOT fitted to data — every output must keep saying so.
 - **`tracks.parquet` is pixel space** and survives re-calibration. Court-derived
@@ -57,6 +72,23 @@ Module map: `court` (geometry/homography) → `tracking` (YOLO + stitch) →
   for MPS and end up slower.
 - Never pass `half=True` to the YOLO tracker — the MPS fp16 fallback is ~27x
   slower (measured in the sibling dinkiq project).
+
+## Performance (measured, `scripts/bench_tracking.py`, M1)
+
+| | ms/frame | projected hour-long 60 fps match |
+|---|---|---|
+| yolov8s-pose (default) | 66 | 39 min |
+| yolov8n-pose | 34 | 20 min |
+
+- **Decode is free** (0.4 ms/frame). Inference is the entire cost.
+- **`stream=True` is NOT faster** than per-frame `model.track` (66.0 vs 66.1).
+  The per-call overhead hypothesis was measured and disproved — don't re-litigate.
+- Nano is ~1.9x faster and lost nothing on the pickleball test clip (slightly
+  more detections, identical keypoint completeness). It is still not the default,
+  because that clip has large near-court players and the volleyball risk is the
+  opposite: a far-endline player is a third the pixel height, and missing them
+  breaks subject resolution and attribution. Switch with `SPIKEIQ_MODEL=yolov8n-pose.pt`
+  and confirm with `scripts/accuracy.py` once there is footage.
 
 ## Gotchas
 

@@ -77,6 +77,34 @@ ball-in-play and the referee brackets every rally for free:
 | rating | `rating.json` |
 | feedback | `feedback.json` |
 
+## Reviewing a match
+
+The analysis proposes; you confirm. After it finishes, **Review rallies** lists
+them worst-first — the ones where it could not tell which player was you, could
+not work out who won, or could not read the touches. Click yourself on a
+thumbnail to fix the subject, change any action label from the dropdowns, mark a
+rally "looks right" or "not a rally", then save. Re-running skips tracking
+entirely, so corrections cost seconds.
+
+Fixing the top few rallies is usually enough. Your corrections also become a
+labelled dataset:
+
+```bash
+.venv/bin/python scripts/export_labels.py --out labels.jsonl
+.venv/bin/python scripts/accuracy.py labels.jsonl
+```
+
+That prints per-action recall, precision and a confusion matrix, and enforces
+the standing gate — 80% on 50 labelled contacts — before the skill numbers mean
+anything.
+
+## Speed
+
+An hour of 60 fps film takes about 39 minutes to track on an M1. Decode is free;
+the pose model is the entire cost. `SPIKEIQ_MODEL=yolov8n-pose.pt` roughly halves
+it — measure with `scripts/bench_tracking.py`, and check accuracy before trusting
+the faster model on far-court players.
+
 ## What it does not claim
 
 - **The rubric is uncalibrated.** Level bands (B/BB/A/AA/Open) come from

@@ -46,6 +46,22 @@ def test_bridging_costs_a_small_fraction_of_full_tracking():
     assert 1.0 < bridged / rallies_only < 1.5
 
 
+def test_model_defaults_to_the_larger_pose_model(monkeypatch):
+    """The nano model benchmarks ~1.9x faster and lost nothing on the test
+    clip, but that clip is large near-court players. Under-detecting a small
+    far-court figure breaks subject resolution and attribution, which costs
+    more than the wait, so the safe model stays the default."""
+    from tracking import DEFAULT_MODEL, model_name
+    monkeypatch.delenv("SPIKEIQ_MODEL", raising=False)
+    assert model_name() == DEFAULT_MODEL == "yolov8s-pose.pt"
+
+
+def test_model_can_be_switched_by_environment(monkeypatch):
+    from tracking import model_name
+    monkeypatch.setenv("SPIKEIQ_MODEL", "yolov8n-pose.pt")
+    assert model_name() == "yolov8n-pose.pt"
+
+
 def test_bridge_gap_allowance_exceeds_the_bridge_spacing():
     """A stitching allowance smaller than the sample spacing guarantees the
     chain snaps at the first dead ball — the original bug."""

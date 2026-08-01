@@ -12,6 +12,7 @@ Ported from dinkiq/src/tracking.py, with two volleyball-driven changes:
    spends its time on (`assign_sides`).
 """
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,7 +23,24 @@ from ultralytics import YOLO
 
 from court import NET_Y, CourtCalibration, on_court
 
-MODEL_NAME = "yolov8s-pose.pt"
+# Pose model. Benchmarked on an M1 (scripts/bench_tracking.py): the nano model
+# is ~1.9x faster — about 20 minutes per match against 39 — and on the test clip
+# it lost nothing, detecting marginally MORE people per frame with identical
+# keypoint completeness.
+#
+# The default stays on the small model anyway, because that clip is broadcast
+# footage of large, near-court players and the case that matters here is the
+# opposite one: a player at the far endline of a volleyball court is a third the
+# pixel height, and under-detecting them breaks subject resolution and contact
+# attribution, which cost far more than the wait. Switch with SPIKEIQ_MODEL and
+# confirm with scripts/accuracy.py once there is footage to confirm against.
+DEFAULT_MODEL = "yolov8s-pose.pt"
+
+
+def model_name() -> str:
+    return os.environ.get("SPIKEIQ_MODEL", DEFAULT_MODEL)
+
+
 
 # COCO keypoint indices we keep. Wrists drive contact classification, ankles
 # drive jump height, shoulders/hips give the body reference heights that tell a
@@ -100,7 +118,7 @@ def run_tracking(video: Path, out_parquet: Path, models_dir: Path,
     """
     if stride is None:
         stride = TRACK_STRIDE
-    model = YOLO(str(models_dir / MODEL_NAME))
+    model = YOLO(str(models_dir / model_name()))
 
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
