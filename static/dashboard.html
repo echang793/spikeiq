@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpikeIQ</title>
+<!--BASE-->
+<style>
+  :root {
+    --bg: #10131a; --panel: #171b24; --line: #262c38; --ink: #e6e9ef;
+    --dim: #8d97a8; --accent: #ff8a3d; --good: #46c78d; --bad: #e2604f;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { padding: 18px 22px; border-bottom: 1px solid var(--line);
+           display: flex; align-items: baseline; gap: 14px; }
+  h1 { margin: 0; font-size: 20px; letter-spacing: .5px; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--dim); font-size: 13px; }
+  main { max-width: 1000px; margin: 0 auto; padding: 22px; }
+  section { background: var(--panel); border: 1px solid var(--line);
+            border-radius: 10px; padding: 18px; margin-bottom: 18px; }
+  h2 { margin: 0 0 12px; font-size: 15px; text-transform: uppercase;
+       letter-spacing: 1px; color: var(--dim); }
+  button { background: var(--accent); color: #17110b; border: 0; padding: 9px 16px;
+           border-radius: 7px; font-weight: 600; cursor: pointer; font-size: 14px; }
+  button.ghost { background: transparent; color: var(--dim);
+                 border: 1px solid var(--line); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  input, select { background: #0d1017; color: var(--ink); border: 1px solid var(--line);
+                  border-radius: 7px; padding: 8px 10px; font-size: 14px; }
+  label { display: block; margin: 10px 0 4px; font-size: 13px; color: var(--dim); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 500; font-size: 12px;
+       text-transform: uppercase; letter-spacing: .6px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 20px;
+          font-size: 12px; border: 1px solid var(--line); color: var(--dim); }
+  .pill.warn { color: var(--accent); border-color: var(--accent); }
+  .band { font-size: 44px; font-weight: 700; line-height: 1; }
+  .muted { color: var(--dim); font-size: 13px; }
+  .tip { border-left: 3px solid var(--accent); padding: 8px 0 8px 12px;
+         margin-bottom: 12px; }
+  .tip.keep { border-left-color: var(--good); }
+  .bar { height: 7px; background: #0d1017; border-radius: 4px; overflow: hidden; }
+  .bar > div { height: 100%; background: var(--accent); }
+  #calibWrap { position: relative; display: inline-block; max-width: 100%; }
+  #calibImg { max-width: 100%; display: block; border-radius: 8px; cursor: crosshair; }
+  .dot { position: absolute; width: 13px; height: 13px; margin: -7px 0 0 -7px;
+         border-radius: 50%; border: 2px solid #fff; background: var(--accent);
+         font-size: 9px; color: #000; text-align: center; line-height: 10px; }
+  .dot.me { background: var(--good); }
+  .hide { display: none; }
+  ul.plain { list-style: none; padding: 0; margin: 0; }
+  ul.plain li { padding: 5px 0; border-bottom: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Spike<span>IQ</span></h1>
+  <div class="sub">indoor 6v6 film analysis</div>
+</header>
+<main>
+
+<section id="uploadPanel">
+  <h2>New match</h2>
+  <div class="row">
+    <div>
+      <label for="file">Match video</label>
+      <input type="file" id="file" accept="video/*">
+    </div>
+    <div>
+      <label for="label">Label</label>
+      <input type="text" id="label" placeholder="Tuesday league, week 3">
+    </div>
+    <div>
+      <label for="height">Your height (cm)</label>
+      <input type="number" id="height" value="180" min="120" max="230">
+    </div>
+    <button id="uploadBtn">Upload</button>
+  </div>
+  <p class="muted" id="uploadNote">
+    Fixed camera, elevated corner behind the endline, whole court in frame, mic
+    unobstructed. Rallies are found from the referee's whistle, so audio matters.
+  </p>
+</section>
+
+<section id="sessionsPanel">
+  <h2>Sessions</h2>
+  <table><tbody id="sessionRows"></tbody></table>
+</section>
+
+<section id="calibPanel" class="hide">
+  <h2>Calibrate</h2>
+  <p class="muted" id="calibPrompt"></p>
+  <div id="calibWrap">
+    <img id="calibImg" alt="first rally frame">
+  </div>
+  <div class="row" style="margin-top:12px">
+    <button id="calibUndo" class="ghost">Undo</button>
+    <button id="calibReset" class="ghost">Start over</button>
+    <button id="calibGo" disabled>Analyse</button>
+  </div>
+</section>
+
+<section id="progressPanel" class="hide">
+  <h2>Working</h2>
+  <div id="progressBody"></div>
+</section>
+
+<section id="reportPanel" class="hide">
+  <h2>Report</h2>
+  <div id="reportBody"></div>
+</section>
+
+<script>
+const BASE = window.__BASE__ || "";
+const api = (p, o) => fetch(BASE + p, o);
+const $ = id => document.getElementById(id);
+const pct = v => v === null || v === undefined ? "—" : (v * 100).toFixed(1) + "%";
+const sign = v => v === null || v === undefined ? "—" : (v >= 0 ? "+" : "") + v.toFixed(3);
+
+let current = null;
+let clicks = [];
+let subjectClick = null;
+
+// 8 court points, then yourself. Same click order each time so the homography
+// targets line up: far-left, far-right, near-right, near-left.
+const STEPS = [
+  "far-left court corner", "far-right court corner",
+  "near-right court corner", "near-left court corner",
+  "far-left attack line (where the 3 m line meets the sideline)",
+  "far-right attack line", "near-right attack line", "near-left attack line",
+];
+
+$("uploadBtn").onclick = async () => {
+  const f = $("file").files[0];
+  if (!f) return alert("Pick a video first.");
+  const fd = new FormData();
+  fd.append("file", f);
+  fd.append("label", $("label").value);
+  fd.append("height_m", (parseFloat($("height").value) || 180) / 100);
+  $("uploadBtn").disabled = true;
+  $("uploadNote").textContent = "Uploading…";
+  const r = await api("/api/upload", { method: "POST", body: fd });
+  const j = await r.json();
+  $("uploadBtn").disabled = false;
+  $("uploadNote").textContent = "Finding rallies from the audio — this is quick.";
+  current = j.session;
+  poll();
+};
+
+async function loadSessions() {
+  const j = await (await api("/api/sessions")).json();
+  $("sessionRows").innerHTML = j.sessions.map(s => `
+    <tr>
+      <td><a href="#" onclick="open_('${s.session}');return false">${esc(s.label)}</a></td>
+      <td class="muted">${s.status.stage} / ${s.status.state}</td>
+      <td class="num">${s.band || ""}</td>
+    </tr>`).join("") || `<tr><td class="muted">No sessions yet.</td></tr>`;
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+window.open_ = sid => { current = sid; poll(); };
+
+async function poll() {
+  if (!current) return;
+  const s = await (await api("/api/session/" + current)).json();
+  render(s);
+  const state = s.status.state;
+  if (state === "running" || state === "queued") setTimeout(poll, 1500);
+  loadSessions();
+}
+
+function render(s) {
+  const st = s.status || {};
+  if (st.state === "error") {
+    show("progressPanel");
+    $("progressBody").innerHTML =
+      `<p style="color:var(--bad)">${esc(st.error)}</p>`;
+    return;
+  }
+  if (st.state === "running" || st.state === "queued") {
+    show("progressPanel");
+    const p = Math.round((st.progress || 0) * 100);
+    $("progressBody").innerHTML = `
+      <p>${esc(st.stage)} — ${esc(st.state)}</p>
+      <div class="bar"><div style="width:${p}%"></div></div>`;
+  } else {
+    hide("progressPanel");
+  }
+  if (st.stage === "prepared" && !s.calibrated) return showCalibration(s);
+  if (s.feedback && s.feedback.tips) return showReport(s);
+}
+
+function show(id) { $(id).classList.remove("hide"); }
+function hide(id) { $(id).classList.add("hide"); }
+
+function showCalibration(s) {
+  show("calibPanel");
+  hide("reportPanel");
+  clicks = []; subjectClick = null;
+  $("calibImg").src = BASE + "/api/session/" + current + "/frame?t=" + Date.now();
+  drawDots();
+  const r = s.rallies_summary || {};
+  $("uploadNote").textContent =
+    `Found ${r.rally_count || 0} rallies across ${r.set_count || 0} set(s).`;
+}
+
+$("calibImg").onclick = e => {
+  const img = $("calibImg");
+  const rect = img.getBoundingClientRect();
+  // store in ORIGINAL image pixels: the homography is fitted in source
+  // coordinates, and the browser is showing a scaled copy
+  const sx = img.naturalWidth / rect.width;
+  const sy = img.naturalHeight / rect.height;
+  const pt = [(e.clientX - rect.left) * sx, (e.clientY - rect.top) * sy];
+  if (clicks.length < STEPS.length) clicks.push(pt);
+  else subjectClick = pt;
+  drawDots();
+};
+
+$("calibUndo").onclick = () => {
+  if (subjectClick) subjectClick = null; else clicks.pop();
+  drawDots();
+};
+$("calibReset").onclick = () => { clicks = []; subjectClick = null; drawDots(); };
+
+function drawDots() {
+  const wrap = $("calibWrap");
+  wrap.querySelectorAll(".dot").forEach(d => d.remove());
+  const img = $("calibImg");
+  const sx = img.clientWidth / (img.naturalWidth || 1);
+  const sy = img.clientHeight / (img.naturalHeight || 1);
+  const place = (pt, cls, text) => {
+    const d = document.createElement("div");
+    d.className = "dot " + cls;
+    d.style.left = (pt[0] * sx) + "px";
+    d.style.top = (pt[1] * sy) + "px";
+    d.textContent = text;
+    wrap.appendChild(d);
+  };
+  clicks.forEach((p, i) => place(p, "", i + 1));
+  if (subjectClick) place(subjectClick, "me", "★");
+
+  const done = clicks.length >= STEPS.length;
+  $("calibPrompt").textContent = !done
+    ? `Click the ${STEPS[clicks.length]} (${clicks.length + 1} of ${STEPS.length}).`
+    : (subjectClick ? "Ready — press Analyse."
+                    : "Now click yourself on the court.");
+  $("calibGo").disabled = !(done && subjectClick);
+}
+
+$("calibGo").onclick = async () => {
+  $("calibGo").disabled = true;
+  await api("/api/session/" + current + "/calibrate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      corners: clicks.slice(0, 4),
+      attack: clicks.slice(4, 8),
+      subject_click: subjectClick,
+      height_m: (parseFloat($("height").value) || 180) / 100,
+    }),
+  });
+  hide("calibPanel");
+  poll();
+};
+
+function showReport(s) {
+  hide("calibPanel");
+  show("reportPanel");
+  const fb = s.feedback, r = s.rating, m = s.metrics || {};
+  const o = m.overall || {};
+  const rot = (s.rotation || {}).summary || {};
+
+  const dims = Object.entries(r.dimensions || {}).map(([k, d]) => `
+    <tr><td>${esc(d.label)}</td>
+        <td class="num">${d.value}</td>
+        <td class="num">${d.level.toFixed(1)}</td>
+        <td>${d.low_sample ? '<span class="pill warn">thin sample</span>' : ""}</td>
+    </tr>`).join("");
+
+  const roles = (fb.by_role || []).map(n =>
+    `<li>${esc(n.note)}</li>`).join("") || "<li class='muted'>No positions resolved.</li>";
+
+  const tips = (fb.tips || []).map(t => `
+    <div class="tip ${t.priority === "keep" ? "keep" : ""}">
+      <strong>${esc(t.label)}</strong>
+      ${t.next_target ? `<span class="pill">next: ${t.next_target.value}</span>` : ""}
+      <div>${esc(t.note)}</div>
+    </div>`).join("");
+
+  const skill = (name, rows) => `
+    <h3 style="font-size:14px;margin:16px 0 6px">${name}</h3>
+    <table><tbody>${rows}</tbody></table>`;
+  const line = (k, v) => `<tr><td>${k}</td><td class="num">${v}</td></tr>`;
+
+  const atk = o.attacking || {}, pas = o.passing || {}, srv = o.serving || {};
+  const blk = o.blocking || {}, def = o.defense || {}, set_ = o.setting || {};
+  const jm = (s.jumps || {}).summary || {};
+  const mv = m.movement || {};
+
+  $("reportBody").innerHTML = `
+    <div class="row" style="align-items:center;gap:22px">
+      <div><div class="band">${esc(r.band || "—")}</div>
+           <div class="muted">level ${r.level ?? "—"}</div></div>
+      <div><div class="muted">confidence</div>
+           <div class="bar" style="width:180px">
+             <div style="width:${Math.round((r.confidence || 0) * 100)}%"></div>
+           </div>
+           <div class="muted">${pct(r.confidence)}</div></div>
+      <div class="muted" style="flex:1;min-width:220px">${esc(fb.caveat || "")}</div>
+    </div>
+
+    <h3 style="font-size:14px;margin:20px 0 6px">By position</h3>
+    <ul class="plain">${roles}</ul>
+    <p class="muted">Played ${rot.positions_played || 0} position(s) over
+       ${rot.rallies_with_role || 0} of ${rot.rallies || 0} rallies.</p>
+
+    <h3 style="font-size:14px;margin:20px 0 6px">What to work on</h3>
+    ${tips}
+
+    <h3 style="font-size:14px;margin:20px 0 6px">Skill levels</h3>
+    <table>
+      <thead><tr><th>Measure</th><th class="num">Value</th>
+                 <th class="num">Level</th><th></th></tr></thead>
+      <tbody>${dims}</tbody>
+    </table>
+
+    ${skill("Attacking",
+      line("Attempts", atk.attempts ?? 0) + line("Kills", atk.kills ?? 0) +
+      line("Errors", atk.errors ?? 0) + line("Hitting %", sign(atk.hitting_pct)) +
+      line("Unscored", atk.unscored ?? 0))}
+    ${skill("Serving",
+      line("Attempts", srv.attempts ?? 0) + line("Aces", srv.aces ?? 0) +
+      line("Errors", srv.errors ?? 0) + line("Ace rate", pct(srv.ace_pct)))}
+    ${skill("Serve receive",
+      line("Attempts", pas.attempts ?? 0) + line("Rating (0-3)", pas.rating ?? "—") +
+      line("Perfect", pct(pas.perfect_pct)) + line("Shanked", pct(pas.shank_pct)))}
+    ${skill("Blocking / defence",
+      line("Blocks", blk.attempts ?? 0) + line("Stuffs", blk.stuffs ?? 0) +
+      line("Digs", def.digs ?? 0) + line("Dig conversion", pct(def.conversion_pct)))}
+    ${skill("Setting",
+      line("Sets", set_.attempts ?? 0) + line("Assists", set_.assists ?? 0))}
+    ${skill("Athletic / movement",
+      line("Best jump", jm.best_m ? jm.best_m + " m" : "—") +
+      line("Median jump", jm.median_m ? jm.median_m + " m" : "—") +
+      line("Distance in play", (mv.distance_m ?? 0) + " m") +
+      line("Metres per rally", mv.metres_per_rally ?? "—"))}
+
+    <p class="muted" style="margin-top:18px">
+      ${(m.coverage || {}).subject_touches ?? 0} of your touches were resolved
+      across ${(m.coverage || {}).rallies_with_winner ?? 0} scored rallies.
+    </p>`;
+}
+
+loadSessions();
+setInterval(loadSessions, 8000);
+</script>
+</main>
+</body>
+</html>

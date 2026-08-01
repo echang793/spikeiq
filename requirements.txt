@@ -1,0 +1,15 @@
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9
+pydantic>=2.7
+opencv-python>=4.10
+ultralytics>=8.3
+numpy>=1.26
+pandas>=2.2
+pyarrow>=17.0
+librosa>=0.10
+scipy>=1.13
+httpx
+pytest
+requests>=2.31
+Pillow>=10.1

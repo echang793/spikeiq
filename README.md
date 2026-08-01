@@ -1,0 +1,97 @@
+# SpikeIQ
+
+Upload indoor 6v6 volleyball film, get an analysis of **your** play: hitting
+percentage, serve-receive rating, blocking, defence, jump height and movement —
+broken out by the position you were playing in each rally.
+
+## Setup
+
+```bash
+brew install ffmpeg
+/opt/homebrew/bin/python3.13 -m venv .venv    # torch has no 3.14 build
+.venv/bin/pip install -r requirements.txt
+```
+
+YOLO weights download to `models/` on first run.
+
+## Run
+
+```bash
+.venv/bin/python src/server.py    # http://127.0.0.1:8101
+```
+
+Upload a match, wait a few seconds for the rally scan, click the eight court
+reference points and then yourself, and press Analyse.
+
+## How to record
+
+The analysis quality is set at record time more than anywhere else.
+
+- **Fixed tripod**, elevated corner behind the endline, ~3-4 m up. Do not pan.
+- **Whole court in frame**, including both endlines and the free zone behind
+  the serving line.
+- **1080p, 60 fps.** 60 helps contact timing and jump peaks; 30 works but is
+  blurrier at spike speed.
+- **Audio on and unobstructed.** Rallies are found from the referee's whistle
+  and the sound of the ball. Silent footage cannot be analysed at all.
+- **Same spot every match**, so calibration and cross-match trends compare.
+
+## How it works
+
+Audio comes first, because a volleyball match is only about a quarter
+ball-in-play and the referee brackets every rally for free:
+
+1. **Whistles vs contacts.** A whistle is a sustained narrowband 1.8-4.5 kHz
+   tone; a ball contact is a broadband transient. Different detectors, cleanly
+   separated.
+2. **Rallies** are the whistle-bracketed intervals that actually contain
+   contacts — timeouts and substitutions fall out on their own. Footage with no
+   referee falls back to silence-gap segmentation.
+3. **Tracking** (YOLOv8-pose + ByteTrack) runs *only inside rally windows*.
+4. **Rally winners come free from the side-out rule**: whoever wins a rally
+   serves the next one, so `winner(N) = serving_side(N+1)`. No ball tracking, no
+   scoreboard reading, no manual tagging. This is what makes kills, errors and
+   hitting percentage computable.
+5. **The rally grammar** decodes each rally with Viterbi over the sequence of
+   contacts. A forearm pass and a dig look *identical* — what separates them is
+   that you pass a serve and dig an attack, so the whole rally is decoded at
+   once rather than each touch independently. The touch count is carried in the
+   decoder state, including that a block is not one of the three touches.
+6. **Position awareness.** The rotational slot at the serve and the zone he
+   actually plays are tracked separately, so every stat is reported per
+   position — a player who rotates through all six is not described by one
+   blended number.
+
+| Stage | Artifact |
+|---|---|
+| ingest | `video.mp4`, `audio.wav`, `frame0.jpg`, `ingest.json` |
+| audio | `whistles.json`, `contacts_audio.json` |
+| rallies | `rallies.json` |
+| tracking | `tracks.parquet` (pixel space, survives re-calibration) |
+| subject | `subject.parquet` |
+| rotation | `rotation.json` |
+| contacts | `contacts.parquet` |
+| grammar | `plays.json` |
+| jump | `jumps.json` |
+| metrics | `metrics.json` |
+| rating | `rating.json` |
+| feedback | `feedback.json` |
+
+## What it does not claim
+
+- **The rubric is uncalibrated.** Level bands (B/BB/A/AA/Open) come from
+  informed anchors in `rating.RUBRIC`, not from film of players whose level is
+  known. They are a consistent yardstick for tracking your own progress, not a
+  placement against the field.
+- **Rates carry their denominators** and a `low_sample` flag. Two swings at
+  100% is reported as two swings at 100%.
+- **Unknown stays unknown.** The last rally of a set has no next serve, so it
+  has no winner and is excluded from kill/error rates rather than guessed.
+- **No ball tracking yet.** Shot direction (line vs cross) is therefore not
+  reported. Everything above works without it.
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest tests/ -q
+```

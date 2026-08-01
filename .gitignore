@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+
+# session artifacts and uploaded film — large, private, and reproducible
+data/
+# YOLO weights auto-download on first run
+models/*.pt
+.env
