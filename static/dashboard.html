@@ -63,8 +63,11 @@
            margin-bottom: 12px; display: flex; gap: 14px; flex-wrap: wrap; }
   .rally.done { opacity: .5; }
   .rally .shot { position: relative; flex: 0 0 300px; max-width: 100%; }
+  /* reserve the space before the frame arrives: a zero-height image has no
+     box for the intersection observer to notice, so it would never load */
   .rally .shot img { width: 100%; border-radius: 6px; display: block;
-                     cursor: crosshair; }
+                     cursor: crosshair; aspect-ratio: 16 / 9;
+                     background: #0d1017; }
   .rally .meta { flex: 1; min-width: 240px; }
   .box { position: absolute; border: 2px solid var(--accent); border-radius: 3px;
          pointer-events: none; }
@@ -499,7 +502,7 @@ function renderRally(r) {
   <div class="rally ${r.subject.corrected ? "done" : ""}" id="rally${r.index}">
     <div class="shot" id="shot${r.index}">
       <img src="${BASE}/api/session/${current}/thumb/${r.index}"
-           onclick="pickSubject(event, ${r.index})" loading="lazy" alt="">
+           onclick="pickSubject(event, ${r.index})" alt="">
     </div>
     <div class="meta">
       <div><strong>Rally ${r.index + 1}</strong>
@@ -522,6 +525,11 @@ function renderRally(r) {
   </div>`;
 }
 
+// Thumbnails load plainly, no lazy-loading machinery. Measured: an uncached
+// thumbnail costs ~60 ms of ffmpeg and nothing at all once cached, so even a
+// hundred-rally match is a few seconds of server work spread across the
+// browser's own six-connection limit — cheaper than the deferral logic, which
+// in this app's own preview did not reliably fire at all.
 function drawBoxes(r) {
   const shot = $("shot" + r.index);
   const img = shot.querySelector("img");
@@ -539,7 +547,9 @@ function drawBoxes(r) {
       shot.appendChild(d);
     });
   };
-  img.complete ? paint() : img.addEventListener("load", paint);
+  // NOT img.complete: that is true for an image with no src yet, and painting
+  // then scales every box against a zero-width image
+  if (img.naturalWidth) paint(); else img.addEventListener("load", paint);
   img._repaint = paint;
   img._data = r;
 }
