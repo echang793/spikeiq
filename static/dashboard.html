@@ -122,6 +122,7 @@ const api = (p, o) => fetch(BASE + p, o);
 const $ = id => document.getElementById(id);
 const pct = v => v === null || v === undefined ? "—" : (v * 100).toFixed(1) + "%";
 const sign = v => v === null || v === undefined ? "—" : (v >= 0 ? "+" : "") + v.toFixed(3);
+const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + "s")}`;
 
 let current = null;
 let clicks = [];
@@ -322,8 +323,9 @@ function showReport(s) {
 
     <h3 style="font-size:14px;margin:20px 0 6px">By position</h3>
     <ul class="plain">${roles}</ul>
-    <p class="muted">Played ${rot.positions_played || 0} position(s) over
-       ${rot.rallies_with_role || 0} of ${rot.rallies || 0} rallies.</p>
+    <p class="muted">Played ${plural(rot.positions_played || 0, "position")} over
+       ${rot.rallies_with_role || 0} of
+       ${plural(rot.rallies || 0, "rally", "rallies")}.</p>
 
     <h3 style="font-size:14px;margin:20px 0 6px">What to work on</h3>
     ${tips}

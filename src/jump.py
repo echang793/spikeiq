@@ -37,6 +37,9 @@ class Jump:
                 "takeoff_t": round(self.takeoff_t, 3), "track_id": self.track_id}
 
 
+LOCAL_WINDOW_S = 2.5   # both the floor line and the pixel ruler are local to this
+
+
 def standing_height_px(df: pd.DataFrame) -> float:
     """Bounding-box height in pixels while the player is on the floor.
 
@@ -62,37 +65,177 @@ def ankle_series(df: pd.DataFrame, fps: float) -> pd.DataFrame:
     })
 
 
+def _window_rows(s: pd.DataFrame, fps: float) -> int:
+    """How many rows LOCAL_WINDOW_S covers, given the tracking stride."""
+    if len(s) < 2:
+        return 1
+    step = float(np.median(np.diff(s["frame"].to_numpy()))) or 1.0
+    return max(3, int(round(LOCAL_WINDOW_S * fps / step)))
+
+
+def _upper_envelope(t: np.ndarray, v: np.ndarray, win: int) -> np.ndarray:
+    """A line that locally hugs the TOP of a noisy series.
+
+    A rolling quantile is not good enough for this. While a player runs from the
+    net to the endline their ankle y climbs the frame at a rate comparable to a
+    jump, so any quantile taken over a window that is long enough to contain
+    standing frames is dragged badly by the trend inside that window.
+
+    So the trend is removed instead of averaged over: fit a straight line to the
+    window, discard the samples sitting above it (in image terms, the airborne
+    ones) and refit on what is left. What comes back is the line the grounded
+    samples lie on, which is the floor even when the floor is moving.
+
+    Used twice — for the ankle floor and for the standing-height ruler — since
+    both are "the value when he is upright and on the ground, right here".
+    """
+    n = len(v)
+    out = np.full(n, np.nan)
+    half = max(2, win // 2)
+    ok = np.isfinite(v)
+    for i in range(n):
+        lo, hi = max(0, i - half), min(n, i + half + 1)
+        idx = np.flatnonzero(ok[lo:hi]) + lo
+        if len(idx) < 3:
+            continue
+        tt, vv = t[idx], v[idx]
+        fit = np.polyfit(tt, vv, 1)
+        resid = vv - np.polyval(fit, tt)
+        # keep the samples at or below the trend line: those are the grounded
+        # ones. Refit only if enough of them survive to define a line.
+        keep = resid >= 0
+        if keep.sum() >= 3 and keep.sum() < len(idx):
+            fit = np.polyfit(tt[keep], vv[keep], 1)
+        out[i] = np.polyval(fit, t[i])
+    return out
+
+
 def detect_jumps(df: pd.DataFrame, fps: float,
                  subject_height_m: float = DEFAULT_HEIGHT_M) -> list[Jump]:
-    """Every jump in one player's track, tallest first is NOT assumed — order
-    is chronological so callers can align jumps with contacts."""
+    """Every jump in one player's track, in chronological order.
+
+    Both the floor line and the pixel-to-metre ruler are computed LOCALLY, over
+    a rolling window rather than the whole track. That is not a refinement, it
+    is the difference between right and wrong: a player at the far endline is a
+    third the pixel height of the same player at the net, and their ankles sit
+    a couple of hundred pixels higher in the frame. Measured against
+    whole-track constants, simply walking up the court reads as a huge jump —
+    which is exactly what showed up on the first real clip.
+    """
     if df.empty:
         return []
+    df = df.sort_values("frame").reset_index(drop=True)
     track_id = int(df["track_id"].iloc[0])
-    px_per_m = standing_height_px(df)
-    if not np.isfinite(px_per_m) or px_per_m <= 0:
-        return []
-    scale = subject_height_m / px_per_m
 
     s = ankle_series(df, fps)
     y = s["y"].to_numpy()
     if np.isnan(y).all():
         return []
-    # the floor line: where the ankles sit most of the time. A high percentile
-    # because image y grows downward, so "on the floor" is a LARGE y.
-    floor = float(np.nanpercentile(y, GROUNDED_PCTL))
-    rise_m = (floor - y) * scale
+
+    win = _window_rows(s, fps)
+    t = s["t"].to_numpy()
+
+    # the local ruler: how tall this player is in pixels right here on the court
+    box_h = (df["y2"] - df["y1"]).to_numpy(dtype=float)
+    box_h = np.where(np.isfinite(box_h) & (box_h > 0), box_h, np.nan)
+    local_px = _upper_envelope(t, box_h, win)
+    fallback = standing_height_px(df)
+    local_px = np.where(np.isfinite(local_px) & (local_px > 0), local_px, fallback)
+
+    # the local floor: where his ankles sit when he is standing, right here.
+    # Image y grows downward, so "on the floor" is the LARGE-y side.
+    floor = _upper_envelope(t, y, win)
+    floor = np.where(np.isfinite(floor), floor,
+                     np.nanpercentile(y, GROUNDED_PCTL))
+
+    with np.errstate(invalid="ignore"):
+        rise_m = (floor - y) * (subject_height_m / local_px)
 
     jumps: list[Jump] = []
     for i in _local_peaks(rise_m, min_value=MIN_JUMP_M):
+        span = _airborne_span(rise_m, i)
+        if span is None or not _hang_time_is_physical(rise_m[i], span, fps):
+            continue
+        if _has_discontinuity(rise_m, t, span):
+            continue
         t_peak = float(s["t"].iloc[i])
         if jumps and t_peak - jumps[-1].t < MIN_SEPARATION_S:
             if rise_m[i] <= jumps[-1].height_m:
                 continue
             jumps.pop()
         jumps.append(Jump(t=t_peak, height_m=float(rise_m[i]),
-                          takeoff_t=_takeoff_time(s, rise_m, i), track_id=track_id))
+                          takeoff_t=float(s["t"].iloc[span[0]]), track_id=track_id))
     return jumps
+
+
+GRAVITY = 9.81
+HANG_TOLERANCE = (0.45, 2.2)   # measured / expected hang time must fall in here
+GROUND_FRACTION = 0.25         # back down to this share of peak = on the floor
+MAX_AIR_S = 1.4
+
+
+def _airborne_span(rise: np.ndarray, peak_i: int) -> tuple[int, int] | None:
+    """Frames from takeoff to landing around a peak, or None if he never lands.
+
+    The "never lands" case is the important one: when the subject's stitched
+    chain switches to a different tracker id, the ankle baseline steps to a new
+    level and stays there. That looks exactly like a jump at the step, except
+    the player never comes back down — so requiring a landing is what separates
+    a real jump from a tracking discontinuity.
+    """
+    threshold = rise[peak_i] * GROUND_FRACTION
+    start = peak_i
+    while start > 0 and np.isfinite(rise[start]) and rise[start] > threshold:
+        start -= 1
+    if start == 0 and np.isfinite(rise[0]) and rise[0] > threshold:
+        return None                      # already airborne at the first frame
+    end = peak_i
+    n = len(rise)
+    while end < n - 1 and np.isfinite(rise[end]) and rise[end] > threshold:
+        end += 1
+    if end >= n - 1 and np.isfinite(rise[-1]) and rise[-1] > threshold:
+        return None                      # never lands
+    return start, end
+
+
+MAX_VERTICAL_MPS = 4.0   # ankle vertical speed peaks around 2-3 m/s in a jump
+
+
+def _has_discontinuity(rise: np.ndarray, t: np.ndarray,
+                       span: tuple[int, int]) -> bool:
+    """True when the "jump" contains a step no body could make.
+
+    When the subject's stitched chain switches to a different tracker id, the
+    ankle position moves half a metre between two adjacent frames. A real
+    take-off is fast but not that fast, so a vertical speed well above anything
+    human is the signature of a tracking discontinuity rather than a jump.
+    """
+    lo, hi = max(0, span[0] - 1), min(len(rise) - 1, span[1] + 1)
+    seg, ts = rise[lo:hi + 1], t[lo:hi + 1]
+    if len(seg) < 2:
+        return False
+    dt = np.diff(ts)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        speed = np.abs(np.diff(seg)) / np.where(dt > 0, dt, np.nan)
+    return bool(np.nanmax(speed, initial=0.0) > MAX_VERTICAL_MPS)
+
+
+def _hang_time_is_physical(height_m: float, span: tuple[int, int],
+                           fps: float) -> bool:
+    """Check the hang time against the height the way gravity would.
+
+    A body that rises h metres is airborne for about 2*sqrt(2h/g) seconds, so
+    height and hang time are not independent measurements — they are one
+    measurement made twice. Tracker noise satisfies neither relation, and the
+    tolerance is wide because at stride 2 on 30 fps footage a jump is only a
+    handful of samples.
+    """
+    air_s = (span[1] - span[0]) / fps
+    if air_s <= 0 or air_s > MAX_AIR_S:
+        return False
+    expected = 2.0 * np.sqrt(2.0 * max(height_m, 1e-3) / GRAVITY)
+    lo, hi = HANG_TOLERANCE
+    return lo * expected <= air_s <= hi * expected
 
 
 def _local_peaks(v: np.ndarray, min_value: float) -> list[int]:
@@ -105,14 +248,6 @@ def _local_peaks(v: np.ndarray, min_value: float) -> list[int]:
         if v[i] >= left and v[i] >= right:
             out.append(i)
     return out
-
-
-def _takeoff_time(s: pd.DataFrame, rise: np.ndarray, peak_i: int) -> float:
-    """Walk back from the peak to the last frame the player was on the floor."""
-    i = peak_i
-    while i > 0 and np.isfinite(rise[i]) and rise[i] > MIN_JUMP_M / 3:
-        i -= 1
-    return float(s["t"].iloc[i])
 
 
 def jump_at(jumps: list[Jump], t: float, window_s: float = 0.45) -> Jump | None:

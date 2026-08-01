@@ -130,6 +130,10 @@ def tips_for(rating: dict, metrics: dict, limit: int = 4) -> list[dict]:
     return work + keep
 
 
+def _plural(n: int, singular: str, plural: str) -> str:
+    return f"{n} {singular}" if n == 1 else f"{n} {plural}"
+
+
 def per_role_notes(by_role: dict, min_rallies: int = 6) -> list[dict]:
     """One line per position played, so the report answers 'where am I strong'
     for a player who rotates through all of them."""
@@ -139,8 +143,8 @@ def per_role_notes(by_role: dict, min_rallies: int = 6) -> list[dict]:
         rallies = stats.get("rallies", 0)
         if rallies < min_rallies:
             notes.append({"role": role, "rallies": rallies,
-                          "note": f"Only {rallies} rallies at {role} — not enough "
-                                  "to say anything yet."})
+                          "note": f"Only {_plural(rallies, 'rally', 'rallies')} "
+                                  f"at {role} — not enough to say anything yet."})
             continue
         atk = stats.get("attacking", {})
         pas = stats.get("passing", {})
@@ -151,10 +155,12 @@ def per_role_notes(by_role: dict, min_rallies: int = 6) -> list[dict]:
             parts.append(f"passed {pas['rating']:.2f}")
         blk = stats.get("blocking", {})
         if blk.get("stuffs"):
-            parts.append(f"{blk['stuffs']} stuff blocks")
+            parts.append(_plural(blk["stuffs"], "stuff block", "stuff blocks"))
         summary = "; ".join(parts) if parts else "no scoring touches recorded"
-        notes.append({"role": role, "rallies": rallies,
-                      "note": f"At {role} over {rallies} rallies: {summary}."})
+        notes.append({
+            "role": role, "rallies": rallies,
+            "note": f"At {role} over {_plural(rallies, 'rally', 'rallies')}: "
+                    f"{summary}."})
     return notes
 
 
