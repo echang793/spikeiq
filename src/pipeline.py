@@ -313,14 +313,17 @@ def analyze(sdir: Path) -> dict:
     # --- metrics, rating, feedback ------------------------------------------
     set_status(sdir, "metrics", "running")
     role_groups = rotation_mod.group_by_role(roles)
+    roles_by_rally = {r.rally_index: r for r in roles}
     m = metrics_mod.compute(rl, plays_by_rally, subject_ids, role_groups,
-                            positions, jump_summary)
+                            positions, jump_summary, roles_by_rally)
     write_json(sdir, "metrics.json", m)
 
     set_status(sdir, "rating", "running")
     q = quality_mod.assess(rl, plays_by_rally, subject_ids,
                            audio_contacts=len(strengths),
-                           subject_touches=m["coverage"]["subject_touches"])
+                           subject_touches=m["coverage"]["subject_touches"],
+                           players_per_side=quality_mod.players_seen_per_side(
+                               tracks, calib))
     write_json(sdir, "quality.json", q.as_dict())
 
     r = rating_mod.estimate(m["overall"] | {"coverage": m["coverage"]},
@@ -331,7 +334,7 @@ def analyze(sdir: Path) -> dict:
     write_json(sdir, "rating.json", r)
 
     set_status(sdir, "feedback", "running")
-    fb = feedback_mod.build(r, m)
+    fb = feedback_mod.build(r, m, rl, plays_by_rally, subject_ids)
     write_json(sdir, "feedback.json", fb)
 
     set_status(sdir, "complete", "done", progress=1.0)

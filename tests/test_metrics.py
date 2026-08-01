@@ -195,6 +195,44 @@ def test_movement_ignores_tracker_teleports():
     assert out["distance_m"] == pytest.approx(0.5)
 
 
+def test_back_row_attacks_in_front_of_the_line_are_counted_as_faults():
+    """A back-row player taking off inside the 3 m line has given the point
+    away. It is a fault, not a swing, and the report should say so."""
+    from rotation import RallyRole
+
+    back = RallyRole(0, 6, 3, "back", "middle blocker", "middle back")
+    plays = {0: [dict(play("attack", "near", ME), y=10.5)]}   # inside the line
+    rallies = [Rally(0, 0.0, 5.0, winner="far")]
+    out = skill_lines(rallies, plays, {ME}, roles_by_rally={0: back})
+    assert out["attacking"]["back_row_faults"] == 1
+
+
+def test_a_legal_back_row_attack_is_not_a_fault():
+    from rotation import RallyRole
+
+    back = RallyRole(0, 6, 3, "back", "middle blocker", "middle back")
+    plays = {0: [dict(play("attack", "near", ME), y=13.5)]}   # behind the line
+    rallies = [Rally(0, 0.0, 5.0, winner="near")]
+    out = skill_lines(rallies, plays, {ME}, roles_by_rally={0: back})
+    assert out["attacking"]["back_row_faults"] == 0
+
+
+def test_a_front_row_attack_at_the_net_is_never_a_fault():
+    from rotation import RallyRole
+
+    front = RallyRole(0, 4, 4, "front", "outside hitter", "left front")
+    plays = {0: [dict(play("attack", "near", ME), y=10.0)]}
+    rallies = [Rally(0, 0.0, 5.0, winner="near")]
+    out = skill_lines(rallies, plays, {ME}, roles_by_rally={0: front})
+    assert out["attacking"]["back_row_faults"] == 0
+
+
+def test_faults_are_zero_when_no_role_was_resolved():
+    plays = {0: [dict(play("attack", "near", ME), y=10.5)]}
+    out = skill_lines([Rally(0, 0.0, 5.0, winner="far")], plays, {ME})
+    assert out["attacking"]["back_row_faults"] == 0
+
+
 def test_compute_slices_the_same_stats_by_position():
     rallies, plays = [], {}
     for i in range(4):

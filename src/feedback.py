@@ -163,17 +163,80 @@ def per_role_notes(by_role: dict, min_rallies: int = 6) -> list[dict]:
     return notes
 
 
-def build(rating: dict, metrics: dict) -> dict:
+MAX_EXAMPLES = 3
+
+
+def example_rallies(dimension: str, rallies, plays_by_rally: dict,
+                    subject_ids) -> list[int]:
+    """Rallies that actually show the problem the tip is about.
+
+    A tip saying "your errors cost more than your kills" is advice; the same
+    tip attached to the three rallies where it happened is something you can
+    watch. Only rallies where the subject did the thing in question qualify —
+    a clip of somebody else's error teaches nothing.
+    """
+    from metrics import (attack_outcome, block_outcome, dig_converted,
+                         ids_for, pass_rating, serve_outcome, set_is_assist)
+
+    hits: list[tuple[float, int]] = []
+    for rally in rallies:
+        plays = plays_by_rally.get(rally.index, [])
+        mine = ids_for(subject_ids, rally.index)
+        for i, p in enumerate(plays):
+            if p["track_id"] not in mine:
+                continue
+            action, rank = p["action"], None
+            if dimension == "attacking" and action == "attack":
+                if attack_outcome(plays, i, rally.winner) in ("error", "blocked"):
+                    rank = 0.0
+            elif dimension == "passing" and action == "pass":
+                grade = pass_rating(plays, i)
+                if grade <= 1:
+                    rank = float(grade)
+            elif dimension in ("serving", "serve_control") and action == "serve":
+                if serve_outcome(plays, i, rally.winner) == "error":
+                    rank = 0.0
+            elif dimension == "blocking" and action == "block":
+                if block_outcome(plays, i, rally.winner) != "stuff":
+                    rank = 0.0
+            elif dimension == "defense" and action == "dig":
+                if not dig_converted(plays, i):
+                    rank = 0.0
+            elif dimension == "setting" and action == "set":
+                if not set_is_assist(plays, i, rally.winner):
+                    rank = 0.0
+            if rank is not None:
+                hits.append((rank, rally.index))
+                break
+    hits.sort()
+    seen, out = set(), []
+    for _, idx in hits:
+        if idx not in seen:
+            seen.add(idx)
+            out.append(idx)
+        if len(out) >= MAX_EXAMPLES:
+            break
+    return out
+
+
+def build(rating: dict, metrics: dict, rallies=None, plays_by_rally=None,
+          subject_ids=None) -> dict:
     """The whole feedback payload the dashboard renders."""
     sw = strengths_and_weaknesses(rating)
     overall = metrics.get("overall", metrics)
+    tips = tips_for(rating, overall)
+    if rallies is not None and plays_by_rally is not None:
+        for tip in tips:
+            if tip["priority"] == "work on":
+                tip["examples"] = example_rallies(
+                    tip["dimension"], rallies, plays_by_rally, subject_ids or {})
     return {
         "band": rating.get("band"),
         "level": rating.get("level"),
         "confidence": rating.get("confidence"),
         "strengths": sw["strengths"],
         "weaknesses": sw["weaknesses"],
-        "tips": tips_for(rating, overall),
+        "tips": tips,
         "by_role": per_role_notes(metrics.get("by_role", {})),
         "caveat": rating.get("note"),
     }

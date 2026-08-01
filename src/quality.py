@@ -76,8 +76,11 @@ def _fraction(num: int, den: int) -> float:
     return num / den if den else 0.0
 
 
+MIN_PLAYERS_PER_SIDE = 4   # of six; below this the court is not all in frame
+
+
 def assess(rallies, plays_by_rally: dict, subject_ids, audio_contacts: int,
-           subject_touches: int) -> Quality:
+           subject_touches: int, players_per_side: dict | None = None) -> Quality:
     """Measure whether the pipeline actually got a grip on this match."""
     from metrics import ids_for
 
@@ -122,7 +125,38 @@ def assess(rallies, plays_by_rally: dict, subject_ids, audio_contacts: int,
               f"Only {subject_touches} of your own touches were found. There is "
               "not enough here to grade any skill."),
     ]
+
+    if players_per_side is not None:
+        # six a side: seeing far fewer than that on one half means the camera
+        # is not covering the whole court, which quietly breaks everything that
+        # depends on knowing who was where
+        seen = min(players_per_side.get("far", 0), players_per_side.get("near", 0))
+        stats["players_per_side"] = players_per_side
+        checks.append(Check(
+            "court_coverage", seen, MIN_PLAYERS_PER_SIDE,
+            seen >= MIN_PLAYERS_PER_SIDE,
+            f"Only {seen} players were ever visible on one side of the net, out "
+            "of six. The camera is probably not covering the whole court — "
+            "move it back or higher."))
+
     return Quality(checks=checks, stats=stats)
+
+
+def players_seen_per_side(tracks, calib) -> dict:
+    """How many distinct player TRACKS were ever seen on each half.
+
+    An over-count, not a headcount: `assign_sides` works on raw track ids and
+    one person fragmented by the tracker counts several times. That is fine for
+    the use here, which is a floor — seeing too few tracks on a side reliably
+    means the camera is missing part of the court, while seeing plenty does not
+    prove the framing is good.
+    """
+    from tracking import assign_sides
+    sides = assign_sides(tracks, calib)
+    counts = {"far": 0, "near": 0}
+    for side in sides.values():
+        counts[side] = counts.get(side, 0) + 1
+    return counts
 
 
 def gate_rating(rating: dict, quality: Quality) -> dict:

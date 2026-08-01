@@ -145,9 +145,13 @@ def _rate(num: int, den: int) -> float | None:
 
 
 def skill_lines(rallies, plays_by_rally: dict[int, list[dict]],
-                subject_ids, rally_indices: list[int] | None = None) -> dict:
+                subject_ids, rally_indices: list[int] | None = None,
+                roles_by_rally: dict | None = None) -> dict:
     """Aggregate every skill over a chosen set of rallies."""
+    from rotation import back_row_attack
+
     wanted = set(rally_indices) if rally_indices is not None else None
+    roles_by_rally = roles_by_rally or {}
     acc = defaultdict(int)
     pass_ratings: list[int] = []
 
@@ -157,6 +161,7 @@ def skill_lines(rallies, plays_by_rally: dict[int, list[dict]],
         plays = plays_by_rally.get(rally.index, [])
         winner = rally.winner
         mine = ids_for(subject_ids, rally.index)
+        role = roles_by_rally.get(rally.index)
         for i, p in enumerate(plays):
             if p["track_id"] not in mine:
                 continue
@@ -164,6 +169,10 @@ def skill_lines(rallies, plays_by_rally: dict[int, list[dict]],
             acc[action] += 1
             if action == "attack":
                 acc[f"attack_{attack_outcome(plays, i, winner)}"] += 1
+                # a back-row player taking off in front of the 3 m line has
+                # given the point away — a fault, not a statistic
+                if role is not None and back_row_attack(role, p.get("y", 0.0)):
+                    acc["attack_back_row_fault"] += 1
             elif action == "serve":
                 acc[f"serve_{serve_outcome(plays, i, winner)}"] += 1
             elif action == "pass":
@@ -196,6 +205,7 @@ def _assemble(acc: dict, pass_ratings: list[int]) -> dict:
             "errors": errors,
             "in_play": acc["attack_in_play"],
             "unscored": attacks - graded_attacks,
+            "back_row_faults": acc["attack_back_row_fault"],
             # hitting percentage is (kills - errors) / attempts, the standard
             # volleyball rate — it can legitimately be negative
             "hitting_pct": _rate(kills - errors, graded_attacks),
@@ -273,10 +283,11 @@ def movement(positions, rallies) -> dict:
 
 
 def by_role(rallies, plays_by_rally: dict[int, list[dict]], subject_ids,
-            role_groups: dict[str, list[int]]) -> dict:
+            role_groups: dict[str, list[int]], roles_by_rally=None) -> dict:
     """The same skill lines, computed separately for each position played."""
     return {
-        role: skill_lines(rallies, plays_by_rally, subject_ids, indices)
+        role: skill_lines(rallies, plays_by_rally, subject_ids, indices,
+                          roles_by_rally)
         | {"rallies": len(indices)}
         for role, indices in role_groups.items()
     }
@@ -284,10 +295,12 @@ def by_role(rallies, plays_by_rally: dict[int, list[dict]], subject_ids,
 
 def compute(rallies, plays_by_rally: dict[int, list[dict]], subject_ids,
             role_groups: dict[str, list[int]], positions=None,
-            jump_summary: dict | None = None) -> dict:
+            jump_summary: dict | None = None, roles_by_rally=None) -> dict:
     return {
-        "overall": skill_lines(rallies, plays_by_rally, subject_ids),
-        "by_role": by_role(rallies, plays_by_rally, subject_ids, role_groups),
+        "overall": skill_lines(rallies, plays_by_rally, subject_ids,
+                               roles_by_rally=roles_by_rally),
+        "by_role": by_role(rallies, plays_by_rally, subject_ids, role_groups,
+                           roles_by_rally),
         "movement": movement(positions, rallies),
         "jumps": jump_summary or {"count": 0},
         "coverage": {

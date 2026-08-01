@@ -89,6 +89,44 @@ def test_stats_are_reported_whether_or_not_the_checks_pass():
     assert q.stats["audio_contacts"] == 60
 
 
+def test_bad_court_framing_fails_loudly():
+    """Six a side: seeing far fewer on one half means the camera is missing
+    part of the court, which quietly breaks everything positional."""
+    rallies, plays, ids = good_match()
+    q = assess(rallies, plays, ids, audio_contacts=120, subject_touches=120,
+               players_per_side={"far": 6, "near": 2})
+    assert not q.usable
+    assert any(c.name == "court_coverage" for c in q.failures)
+    assert "whole court" in q.headline()
+
+
+def test_good_court_framing_passes():
+    rallies, plays, ids = good_match()
+    q = assess(rallies, plays, ids, audio_contacts=120, subject_touches=120,
+               players_per_side={"far": 6, "near": 6})
+    assert q.usable
+    assert q.stats["players_per_side"] == {"far": 6, "near": 6}
+
+
+def test_coverage_check_is_skipped_when_not_measured():
+    rallies, plays, ids = good_match()
+    q = assess(rallies, plays, ids, audio_contacts=120, subject_touches=120)
+    assert all(c.name != "court_coverage" for c in q.checks)
+
+
+def test_players_seen_per_side_counts_both_halves(calib, make_tracks):
+    from conftest import px_for, tracks_frame
+    from quality import players_seen_per_side
+
+    rows = []
+    for tid, (x, y) in {1: (4.5, 4.0), 2: (3.0, 5.0), 3: (4.5, 14.0)}.items():
+        px, py = px_for(calib, x, y)
+        for f in range(40):
+            rows.append(tracks_frame(f, tid, float(px), float(py) - 60.0, h=120.0))
+    counts = players_seen_per_side(make_tracks(rows), calib)
+    assert counts == {"far": 2, "near": 1}
+
+
 def test_gate_removes_the_level_but_keeps_the_dimensions():
     """The number is what gets believed, so that is what goes. The dimensions
     stay, because they are how you see what went wrong."""
