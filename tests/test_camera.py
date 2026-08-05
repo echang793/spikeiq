@@ -216,6 +216,25 @@ def test_unsolved_frames_become_nan_and_drop_out(gym_frame):
     assert not on_court(*got[1])
 
 
+def test_an_absurd_warp_is_dropped_rather_than_flagged(gym_frame):
+    """Seen on cropped footage where most background texture was gone: a few
+    frames produced confident nonsense in the thousands of pixels. A warp claiming
+    the camera moved further than the frame is wide is not worth keeping, however
+    many inliers agreed."""
+    from camera import _absurd_motion_limit
+
+    limit = _absurd_motion_limit(gym_frame.shape)
+    assert limit > 1000  # frame diagonal for a 1280x720 frame
+
+    solver = CameraSolver(gym_frame, detect_cuts=False)
+    # a warp far beyond anything physical, injected past the feature solve
+    solver.track.confidence[7] = 0.9
+    huge = shift_homography(5000.0, 0.0)
+    motion = _corner_motion(huge, _frame_corners(solver.ref_grey.shape),
+                            solver.scale)
+    assert motion > limit
+
+
 def test_beyond_supported_motion_is_flagged():
     """The honest boundary of a solve-against-reference design."""
     track = CameraTrack(warps={1: shift_homography(400, 0)},

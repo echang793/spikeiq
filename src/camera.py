@@ -206,9 +206,19 @@ class CameraSolver:
         self.track.confidence[frame_idx] = conf
         if warp is None:
             return
+        motion = _corner_motion(warp, self.corners, self.scale)
+        # A warp claiming the camera moved further than the frame is wide is not
+        # a warp worth keeping, however many inliers agreed. Seen on cropped
+        # footage where most of the background texture was gone: a handful of
+        # frames produced confident nonsense in the thousands of pixels. Dropping
+        # them turns that into an honest unsolved frame instead of a flagged
+        # absurdity carried through to the report.
+        limit = _absurd_motion_limit(frame.shape)
+        if not np.isfinite(motion) or motion > limit:
+            self.track.confidence[frame_idx] = 0.0
+            return
         self.track.warps[frame_idx] = warp
-        self.track.motion_px[frame_idx] = _corner_motion(warp, self.corners,
-                                                         self.scale)
+        self.track.motion_px[frame_idx] = motion
 
     def _solve(self, grey, scale, shape, boxes):
         if self.ref_desc is None or len(self.ref_kp) < MIN_MATCHES:
@@ -262,6 +272,12 @@ def _rescale(H: np.ndarray, src_scale: float, dst_scale: float) -> np.ndarray:
     S_src = np.diag([src_scale, src_scale, 1.0])
     S_dst = np.diag([dst_scale, dst_scale, 1.0])
     return np.linalg.inv(S_dst) @ H @ S_src
+
+
+def _absurd_motion_limit(shape) -> float:
+    """Motion beyond this cannot be a real camera still matching the reference."""
+    h, w = shape[:2]
+    return float(np.hypot(w, h))
 
 
 def _frame_corners(shape) -> np.ndarray:
