@@ -179,6 +179,30 @@ def test_calibrate_rejects_degenerate_points(client, clip):
     assert r.status_code == 400
 
 
+def test_calibrate_rejects_a_truncated_landmark_point(client, clip):
+    """A malformed landmark used to raise an uncaught IndexError inside
+    CourtCalibration.__init__ — a bare 500 instead of the clean 400 every
+    other malformed-input case here already produces."""
+    sid = upload(client, clip).json()["session"]
+    r = client.post(f"/api/session/{sid}/calibrate", json={
+        "landmarks": {"corner_near_left": [5.0]}, "subject_click": [10, 10]})
+    assert r.status_code == 400
+    assert not (pipeline.DATA / sid / "calibration.json").exists()
+
+
+def test_calibrate_rejects_a_truncated_subject_click(client, clip):
+    """Before this fix, a malformed subject_click was stored synchronously
+    (200 OK) and only raised IndexError later inside the background analyze
+    worker — surfacing minutes afterward as a raw exception string instead
+    of a validation error at submission time."""
+    sid = upload(client, clip).json()["session"]
+    r = client.post(f"/api/session/{sid}/calibrate", json={
+        "corners": [[520, 300], [1180, 300], [1600, 940], [180, 940]],
+        "subject_click": [10]})
+    assert r.status_code == 400
+    assert not (pipeline.DATA / sid / "calibration.json").exists()
+
+
 def test_recalibrating_drops_derived_data_but_keeps_tracking(client, clip):
     """Tracking is the hour-long stage and is pure pixel space, so a second
     calibration must not throw it away."""
@@ -222,9 +246,88 @@ def test_delete_cannot_escape_the_sessions_directory(client):
     assert victim.exists()
 
 
+def test_is_within_sessions_rejects_any_escape(client):
+    """Unit-level, not through the HTTP router: Starlette's default {sid}
+    path converter already refuses to match a segment containing '/', and
+    normalizes a bare '..' segment before a route ever sees it, so an HTTP
+    request can't actually reach `_sdir` with an escaping value on this stack
+    (verified: both return the router's own 404, not `_sdir`'s message).
+    `delete_sessions` is the one place `sid` arrives from a JSON body instead
+    of the URL, with no such protection — which is exactly why it had its own
+    bespoke check before this fix generalized it into `_sdir` for every other
+    endpoint too, as defence in depth against a different transport (a proxy
+    that decodes %2F before forwarding, a future `{sid:path}` route) ever
+    exposing the same gap.
+    """
+    outside = pipeline.DATA.parent / "outside"
+    outside.mkdir()
+    assert server._is_within_sessions(pipeline.DATA / "..") is False
+    assert server._is_within_sessions(pipeline.DATA / "../outside") is False
+    assert server._is_within_sessions(outside) is False
+    real = pipeline.DATA / "abc123"
+    real.mkdir()
+    assert server._is_within_sessions(real) is True
+
+
+def test_sdir_raises_404_for_an_escaping_id_and_accepts_a_real_one(client):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        server._sdir("..")
+    assert exc.value.status_code == 404
+
+    real = pipeline.DATA / "abc123"
+    real.mkdir()
+    assert server._sdir("abc123") == real
+
+
 def test_clip_404s_for_a_rally_that_does_not_exist(client, clip):
     sid = upload(client, clip).json()["session"]
     assert client.get(f"/api/session/{sid}/clip/42").status_code == 404
+
+
+# --- auth --------------------------------------------------------------
+
+def test_direct_localhost_bypasses_auth():
+    assert server._is_direct_local("127.0.0.1", {}) is True
+    assert server._is_direct_local("::1", {}) is True
+
+
+def test_a_forwarded_request_never_bypasses_auth_even_from_localhost():
+    """The exact gap this closes: behind a reverse proxy the proxy's own
+    connection to uvicorn is itself on localhost, so without this check every
+    remote request would satisfy the bypass and SPIKEIQ_PASSWORD would
+    protect nothing in exactly the deployment it exists for."""
+    assert server._is_direct_local(
+        "127.0.0.1", {"x-forwarded-for": "203.0.113.5"}) is False
+    assert server._is_direct_local(
+        "127.0.0.1", {"x-forwarded-prefix": "/app/spikeiq"}) is False
+
+
+def test_a_remote_peer_is_never_local():
+    assert server._is_direct_local("203.0.113.5", {}) is False
+
+
+def test_password_gates_the_middleware_end_to_end(client, monkeypatch):
+    """Exercises the real `_basic_auth` middleware, not just the pure
+    decision function above: force the not-local path (TestClient's default
+    peer address is its own fixed value, not something worth fighting to
+    fake as a real remote IP) and confirm the password is actually enforced,
+    then actually accepted with the right credentials."""
+    monkeypatch.setenv("SPIKEIQ_PASSWORD", "sekrit")
+    monkeypatch.setattr(server, "_is_direct_local", lambda *a, **k: False)
+
+    assert client.get("/api/sessions").status_code == 401
+
+    import base64
+    token = base64.b64encode(b"user:sekrit").decode()
+    r = client.get("/api/sessions", headers={"authorization": f"Basic {token}"})
+    assert r.status_code == 200
+
+    wrong = base64.b64encode(b"user:wrong").decode()
+    r_wrong = client.get("/api/sessions",
+                         headers={"authorization": f"Basic {wrong}"})
+    assert r_wrong.status_code == 401
 
 
 def test_review_lists_rallies_worst_first(client, clip):

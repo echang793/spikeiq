@@ -10,6 +10,7 @@ Without that, mounting behind a reverse proxy subpath serves the page fine but
 404s every API call, which looks like the app silently doing nothing.
 """
 
+import hmac
 import json
 import os
 import shutil
@@ -45,19 +46,46 @@ def _load_dotenv(path: Path) -> None:
 _load_dotenv(ROOT / ".env")
 
 
+_LOCALHOST = ("127.0.0.1", "::1", "localhost")
+
+
+def _is_direct_local(client_host: str, headers) -> bool:
+    """True only for an unproxied connection from localhost.
+
+    Pulled out of the middleware as a pure function so the bypass decision is
+    testable without fighting TestClient's ASGI scope internals (its default
+    peer address isn't "127.0.0.1" at all) — and so the one thing that matters
+    here, that any forwarding header defeats the bypass regardless of peer
+    address, is a single obvious assertion rather than buried in middleware.
+    """
+    forwarded = bool(headers.get("x-forwarded-for")
+                     or headers.get("x-forwarded-prefix"))
+    return client_host in _LOCALHOST and not forwarded
+
+
 @app.middleware("http")
 async def _basic_auth(request: Request, call_next):
-    """Password-gate everything except localhost, when a password is set."""
+    """Password-gate everything except a direct localhost connection, when a
+    password is set.
+
+    The localhost bypass only applies to a DIRECT connection. Behind the
+    reverse proxy `_mount_prefix`/`X-Forwarded-Prefix` is written to support,
+    the proxy's own connection to uvicorn is itself on localhost, so every
+    remote request would otherwise satisfy the bypass and SPIKEIQ_PASSWORD
+    would protect nothing in exactly the deployment it exists for. A request
+    carrying any forwarding header is therefore never treated as local,
+    whatever its peer address says.
+    """
     password = os.environ.get("SPIKEIQ_PASSWORD")
     client = request.client.host if request.client else ""
-    if password and client not in ("127.0.0.1", "::1", "localhost"):
+    if password and not _is_direct_local(client, request.headers):
         import base64
         header = request.headers.get("authorization", "")
         ok = False
         if header.startswith("Basic "):
             try:
                 _, _, supplied = base64.b64decode(header[6:]).decode().partition(":")
-                ok = supplied == password
+                ok = hmac.compare_digest(supplied, password)
             except Exception:  # noqa: BLE001 - malformed header is just a failure
                 ok = False
         if not ok:
@@ -84,9 +112,19 @@ def index(request: Request):
     return _spa(STATIC / "dashboard.html", request)
 
 
+def _is_within_sessions(d: Path) -> bool:
+    """Whether `d` is a directory that genuinely lives inside DATA — the guard
+    against a crafted session id ('../../etc') escaping the sessions directory
+    onto anywhere else on disk. Every `sid`-based endpoint reads from, and
+    several write to, whatever `_sdir` returns, so this has to hold everywhere
+    a `sid` is turned into a path, not only on the one endpoint that deletes.
+    """
+    return d.is_dir() and d.resolve().parent == DATA.resolve()
+
+
 def _sdir(sid: str) -> Path:
     d = DATA / sid
-    if not d.exists():
+    if not _is_within_sessions(d):
         raise HTTPException(404, "no such session")
     return d
 
@@ -113,6 +151,23 @@ async def upload(file: UploadFile, label: str = Form(""),
 
 # --- calibration -----------------------------------------------------------
 
+def _bad_point(name: str, point) -> str | None:
+    """None when `point` is a valid [x, y] pixel pair, else an error string.
+
+    Every point in this API is a pixel pair. A truncated one (from a buggy
+    client, say) must fail synchronously here as a clean 400 — matching every
+    other malformed-input case this endpoint already raises — rather than as
+    an uncaught IndexError: immediately, inside `CourtCalibration.__init__`
+    for `landmarks` (a bare 500), or worse, only later for `subject_click`,
+    inside the background analyze worker, where it would surface minutes
+    afterward as a raw exception string in the progress panel instead of a
+    validation error at submission time.
+    """
+    if not isinstance(point, list) or len(point) != 2:
+        return f"{name} must be an [x, y] pixel pair, got {point!r}"
+    return None
+
+
 class Calibration(BaseModel):
     # the landmark form; `corners`/`attack` are the previous fixed-order shape and
     # are still accepted so stored calibrations and older clients keep working
@@ -129,6 +184,20 @@ def calibrate(sid: str, body: Calibration):
     from court import CourtCalibration
 
     sdir = _sdir(sid)
+
+    bad = _bad_point("subject_click", body.subject_click)
+    if body.landmarks:
+        for name, point in body.landmarks.items():
+            bad = bad or _bad_point(f"landmarks[{name!r}]", point)
+    if body.corners:
+        for i, point in enumerate(body.corners):
+            bad = bad or _bad_point(f"corners[{i}]", point)
+    if body.attack:
+        for i, point in enumerate(body.attack):
+            bad = bad or _bad_point(f"attack[{i}]", point)
+    if bad:
+        raise HTTPException(400, bad)
+
     try:
         if body.landmarks:
             calib = CourtCalibration(body.landmarks)
@@ -374,8 +443,7 @@ def delete_sessions(body: BulkDelete):
     removed = []
     for sid in body.sessions:
         d = DATA / sid
-        # guard against a crafted id escaping the sessions directory
-        if d.is_dir() and d.resolve().parent == DATA.resolve():
+        if _is_within_sessions(d):
             shutil.rmtree(d)
             removed.append(sid)
     return {"deleted": removed}
