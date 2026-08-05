@@ -56,30 +56,46 @@ def _last_contact(plays: list[dict]) -> dict | None:
 
 
 def attack_outcome(rally_plays: list[dict], idx: int, winner: str | None) -> str:
-    """'kill', 'error', 'blocked', or 'in_play' for the attack at `idx`."""
+    """'kill', 'error', 'blocked', 'in_play', or 'unknown' for the attack at `idx`.
+
+    The touch sequence is checked before the winner, not after: whether more
+    play followed this attack is knowable from `rally_plays` alone, so an
+    attack with contacts after it is 'in_play' regardless of whether the
+    rally's winner ever got resolved. `winner` is only actually needed for the
+    two sub-cases where the touch sequence alone can't settle it — this
+    contact ended the rally, or the very next contact might have stuffed it —
+    and 'unknown' is reserved for exactly those two cases with no winner.
+    """
     play = rally_plays[idx]
     last = _last_contact(rally_plays)
-    if winner is None or last is None:
+    if last is None:
         return "unknown"
     is_last = idx == len(rally_plays) - 1
     if is_last:
-        return "kill" if winner == play["side"] else "error"
+        return "unknown" if winner is None else (
+            "kill" if winner == play["side"] else "error")
     # an attack stopped dead by the opponent's block is charged to the attacker
     nxt = rally_plays[idx + 1]
     if (idx + 1 == len(rally_plays) - 1 and nxt["action"] == "block"
             and nxt["side"] != play["side"]):
-        return "blocked" if winner != play["side"] else "in_play"
+        return "unknown" if winner is None else (
+            "blocked" if winner != play["side"] else "in_play")
     return "in_play"
 
 
 def serve_outcome(rally_plays: list[dict], idx: int, winner: str | None) -> str:
-    """'ace', 'error', or 'in_play'. An ace is a serve nobody touched."""
+    """'ace', 'error', 'in_play', or 'unknown'. An ace is a serve nobody touched.
+
+    A serve followed by another contact is provably 'in_play' with no need for
+    `winner` at all — only an untouched serve (the ace/error question) actually
+    depends on who won.
+    """
     play = rally_plays[idx]
+    if len(rally_plays) > 1:
+        return "in_play"
     if winner is None:
         return "unknown"
-    if len(rally_plays) == 1:
-        return "ace" if winner == play["side"] else "error"
-    return "in_play"
+    return "ace" if winner == play["side"] else "error"
 
 
 def pass_rating(rally_plays: list[dict], idx: int) -> int:
@@ -110,23 +126,45 @@ def pass_rating(rally_plays: list[dict], idx: int) -> int:
     return 2
 
 
-def set_is_assist(rally_plays: list[dict], idx: int, winner: str | None) -> bool:
-    """A set counts as an assist when the attack it fed was a kill."""
+def set_fed_outcome(rally_plays: list[dict], idx: int,
+                    winner: str | None) -> str:
+    """What became of the attack this set fed.
+
+    'kill' / 'no_kill' when the fed attack's own outcome is known, 'unknown'
+    when it isn't (so callers can tell "definitely not a kill" apart from
+    "can't say" — collapsing those to one bool either deflates assist_pct's
+    denominator or, in feedback's example_rallies, flags an unresolved rally as
+    a demonstrated setting failure), and 'no_attack' when nothing on the same
+    side followed the set at all.
+    """
     play = rally_plays[idx]
     nxt = rally_plays[idx + 1:idx + 2]
     if not nxt or nxt[0]["action"] != "attack" or nxt[0]["side"] != play["side"]:
-        return False
-    return attack_outcome(rally_plays, idx + 1, winner) == "kill"
+        return "no_attack"
+    outcome = attack_outcome(rally_plays, idx + 1, winner)
+    if outcome == "unknown":
+        return "unknown"
+    return "kill" if outcome == "kill" else "no_kill"
+
+
+def set_is_assist(rally_plays: list[dict], idx: int, winner: str | None) -> bool:
+    """A set counts as an assist when the attack it fed was a kill."""
+    return set_fed_outcome(rally_plays, idx, winner) == "kill"
 
 
 def block_outcome(rally_plays: list[dict], idx: int, winner: str | None) -> str:
-    """'stuff' when the block ended the rally in the blocker's favour."""
+    """'stuff' when the block ended the rally in the blocker's favour.
+
+    Touch-sequence first, same reasoning as `attack_outcome`/`serve_outcome`: a
+    block with more contacts after it is provably 'touch' whether or not the
+    rally's winner ever got resolved. Only the last-touch case needs `winner`.
+    """
     play = rally_plays[idx]
+    if idx != len(rally_plays) - 1:
+        return "touch"
     if winner is None:
         return "unknown"
-    if idx == len(rally_plays) - 1:
-        return "stuff" if winner == play["side"] else "error"
-    return "touch"
+    return "stuff" if winner == play["side"] else "error"
 
 
 def dig_converted(rally_plays: list[dict], idx: int) -> bool:
@@ -180,7 +218,11 @@ def skill_lines(rallies, plays_by_rally: dict[int, list[dict]],
                 pass_ratings.append(r)
                 acc[f"pass_{r}"] += 1
             elif action == "set":
-                acc["set_assist"] += int(set_is_assist(plays, i, winner))
+                fed = set_fed_outcome(plays, i, winner)
+                if fed == "unknown":
+                    acc["set_unknown"] += 1
+                else:
+                    acc["set_assist"] += int(fed == "kill")
             elif action == "block":
                 acc[f"block_{block_outcome(plays, i, winner)}"] += 1
             elif action == "dig":
@@ -197,6 +239,14 @@ def _assemble(acc: dict, pass_ratings: list[int]) -> dict:
 
     serves = acc["serve"]
     graded_serves = acc["serve_ace"] + acc["serve_error"] + acc["serve_in_play"]
+
+    # 'unknown' is the residual case attack/serve/block/set_fed_outcome all
+    # keep for when a winner genuinely was needed and genuinely missing — most
+    # of what used to land here is now settled by touch sequence alone, but
+    # the last rally of every set still has no winner to read, so the bucket
+    # is never zero and every graded rate below excludes it explicitly.
+    graded_blocks = acc["block"] - acc["block_unknown"]
+    graded_sets = acc["set"] - acc["set_unknown"]
 
     return {
         "attacking": {
@@ -233,15 +283,17 @@ def _assemble(acc: dict, pass_ratings: list[int]) -> dict:
         "setting": {
             "attempts": acc["set"],
             "assists": acc["set_assist"],
-            "assist_pct": _rate(acc["set_assist"], acc["set"]),
-            "low_sample": acc["set"] < MIN_SAMPLE["set"],
+            "unscored": acc["set_unknown"],
+            "assist_pct": _rate(acc["set_assist"], graded_sets),
+            "low_sample": graded_sets < MIN_SAMPLE["set"],
         },
         "blocking": {
             "attempts": acc["block"],
             "stuffs": acc["block_stuff"],
             "touches": acc["block_touch"],
-            "stuff_pct": _rate(acc["block_stuff"], acc["block"]),
-            "low_sample": acc["block"] < MIN_SAMPLE["block"],
+            "unscored": acc["block_unknown"],
+            "stuff_pct": _rate(acc["block_stuff"], graded_blocks),
+            "low_sample": graded_blocks < MIN_SAMPLE["block"],
         },
         "defense": {
             "digs": acc["dig"],
@@ -263,6 +315,7 @@ def movement(positions, rallies) -> dict:
         return {"distance_m": 0.0, "rallies": 0}
     total = 0.0
     counted = 0
+    play_time = 0.0
     for r in rallies:
         seg = positions[(positions["t"] >= r.start) & (positions["t"] <= r.end)]
         if len(seg) < 2:
@@ -272,7 +325,11 @@ def movement(positions, rallies) -> dict:
         # tracker id switches, not the player teleporting
         total += float(d[d < 2.0].sum())
         counted += 1
-    play_time = sum(r.duration for r in rallies)
+        # only this rally's time counts towards the denominator below — summing
+        # every rally's duration regardless of whether it contributed distance
+        # inflates the denominator whenever the subject has any unresolved
+        # rallies mixed in, silently understating the rate
+        play_time += r.duration
     return {
         "distance_m": round(total, 1),
         "rallies": counted,

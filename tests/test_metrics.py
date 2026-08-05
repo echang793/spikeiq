@@ -2,8 +2,8 @@ import pandas as pd
 import pytest
 
 from metrics import (attack_outcome, block_outcome, compute, dig_converted,
-                     movement, pass_rating, serve_outcome, set_is_assist,
-                     skill_lines)
+                     movement, pass_rating, serve_outcome, set_fed_outcome,
+                     set_is_assist, skill_lines)
 from rallies import Rally
 
 ME = 1
@@ -56,6 +56,26 @@ def test_attack_outcome_is_unknown_without_a_rally_winner():
     assert attack_outcome(plays, 3, None) == "unknown"
 
 
+def test_attack_outcome_is_in_play_without_a_winner_if_more_play_followed():
+    """Whether more play followed this attack is knowable from the touch
+    sequence alone. An unresolved rally winner must not throw that away — the
+    last rally of every set has exactly this shape (a winner-less resolution)
+    and it happens every set, not on rare occasions."""
+    plays = [play("serve", "far"), play("pass", "near", ME),
+             play("set", "near", THEM), play("attack", "near", ME),
+             play("dig", "far"), play("set", "far"), play("attack", "far")]
+    assert attack_outcome(plays, 3, None) == "in_play"
+
+
+def test_attack_blocked_charge_still_needs_the_winner():
+    """The one sub-case that genuinely can't be settled by touch sequence
+    alone: whether the block that immediately followed actually stuffed it."""
+    plays = [play("serve", "far"), play("pass", "near", ME),
+             play("set", "near", THEM), play("attack", "near", ME),
+             play("block", "far")]
+    assert attack_outcome(plays, 3, None) == "unknown"
+
+
 def test_an_untouched_serve_is_an_ace():
     plays = [play("serve", "near", ME)]
     assert serve_outcome(plays, 0, "near") == "ace"
@@ -65,6 +85,17 @@ def test_an_untouched_serve_is_an_ace():
 def test_a_returned_serve_is_neither():
     plays = [play("serve", "near", ME), play("pass", "far")]
     assert serve_outcome(plays, 0, "near") == "in_play"
+
+
+def test_a_returned_serve_is_in_play_even_without_a_winner():
+    """The serve was clearly touched — that needs no winner to know."""
+    plays = [play("serve", "near", ME), play("pass", "far")]
+    assert serve_outcome(plays, 0, None) == "in_play"
+
+
+def test_an_untouched_serve_with_no_winner_is_unknown():
+    plays = [play("serve", "near", ME)]
+    assert serve_outcome(plays, 0, None) == "unknown"
 
 
 @pytest.mark.parametrize("rest,want", [
@@ -87,6 +118,26 @@ def test_set_is_an_assist_only_when_the_attack_scored():
     assert set_is_assist(scored, 1, "far") is False
 
 
+def test_set_fed_outcome_distinguishes_no_kill_from_unknown():
+    """'definitely not a kill' and 'can't say' must not collapse to the same
+    thing — one is real information for a denominator, the other is a gap."""
+    fed_error = [play("pass", "near"), play("set", "near", ME),
+                play("attack", "near"), play("block", "far")]
+    # the attack is the last touch of the rally either way; only `winner`
+    # differs between the "kill" and "unknown" cases below
+    fed_last_touch = [play("pass", "near"), play("set", "near", ME),
+                      play("attack", "near")]
+    no_attack = [play("pass", "near"), play("set", "near", ME),
+                play("pass", "far")]
+    assert set_fed_outcome(fed_error, 1, "far") == "no_kill"
+    assert set_fed_outcome(fed_last_touch, 1, None) == "unknown"
+    assert set_fed_outcome(fed_last_touch, 1, "near") == "kill"
+    assert set_fed_outcome(no_attack, 1, "near") == "no_attack"
+    # set_is_assist must keep returning exactly what it always did
+    assert set_is_assist(fed_last_touch, 1, "near") is True
+    assert set_is_assist(fed_last_touch, 1, None) is False
+
+
 def test_block_that_ends_the_rally_is_a_stuff():
     plays = [play("attack", "far"), play("block", "near", ME)]
     assert block_outcome(plays, 1, "near") == "stuff"
@@ -97,6 +148,20 @@ def test_block_that_kept_the_ball_alive_is_a_touch():
     plays = [play("attack", "far"), play("block", "near", ME),
              play("dig", "far"), play("set", "far")]
     assert block_outcome(plays, 1, "far") == "touch"
+
+
+def test_block_that_kept_the_ball_alive_is_a_touch_even_without_a_winner():
+    """More contacts followed — that alone proves 'touch', no winner needed.
+    Before this fix every block in the last rally of a set was marked
+    'unknown' regardless of how the touch sequence actually played out."""
+    plays = [play("attack", "far"), play("block", "near", ME),
+             play("dig", "far"), play("set", "far")]
+    assert block_outcome(plays, 1, None) == "touch"
+
+
+def test_a_terminal_block_with_no_winner_is_unknown():
+    plays = [play("attack", "far"), play("block", "near", ME)]
+    assert block_outcome(plays, 1, None) == "unknown"
 
 
 def test_dig_is_converted_when_your_side_gets_a_swing_out_of_it():
@@ -156,6 +221,41 @@ def test_low_sample_is_flagged():
     assert out["low_sample"] is True
 
 
+def test_blocking_rate_excludes_unresolved_rallies_from_its_denominator():
+    """Mirrors how attacking/serving already work: a block whose rally never
+    got a winner is unscored, not counted against stuff_pct's denominator."""
+    rallies, plays = [], {}
+    for i in range(3):
+        # each block is the last touch of its own rally, so it needs `winner`
+        plays[i] = [play("attack", "far"), play("block", "near", ME)]
+        rallies.append(Rally(i, i * 10.0, i * 10.0 + 5, winner="near"))
+    for i in range(3, 5):
+        plays[i] = [play("attack", "far"), play("block", "near", ME)]
+        rallies.append(Rally(i, i * 10.0, i * 10.0 + 5, winner=None))
+    out = skill_lines(rallies, plays, {ME})["blocking"]
+    assert out["attempts"] == 5
+    assert out["unscored"] == 2
+    assert out["stuffs"] == 3
+    assert out["stuff_pct"] == 1.0        # 3 stuffs / 3 graded, not / 5
+
+
+def test_setting_rate_excludes_unresolved_rallies_from_its_denominator():
+    rallies, plays = [], {}
+    for i in range(4):
+        plays[i] = [play("pass", "near"), play("set", "near", ME),
+                    play("attack", "near")]
+        rallies.append(Rally(i, i * 10.0, i * 10.0 + 5,
+                             winner="near" if i < 4 else None))
+    plays[4] = [play("pass", "near"), play("set", "near", ME),
+               play("attack", "near")]
+    rallies.append(Rally(4, 40.0, 45.0, winner=None))
+    out = skill_lines(rallies, plays, {ME})["setting"]
+    assert out["attempts"] == 5
+    assert out["unscored"] == 1
+    assert out["assists"] == 4
+    assert out["assist_pct"] == 1.0       # 4 assists / 4 graded, not / 5
+
+
 def test_only_the_subjects_touches_are_counted():
     plays = {0: [play("serve", "far", THEM), play("pass", "near", ME),
                  play("set", "near", THEM), play("attack", "near", THEM)]}
@@ -193,6 +293,23 @@ def test_movement_ignores_tracker_teleports():
                         "y": [0.0, 0.0, 0.0], "frame": [0, 3, 6]})
     out = movement(pos, [Rally(0, 0.0, 1.0)])
     assert out["distance_m"] == pytest.approx(0.5)
+
+
+def test_metres_per_minute_only_counts_the_time_that_contributed_distance():
+    """The denominator must match the numerator's scope. A rally with no
+    position data contributes nothing to `distance_m` and must not inflate
+    the time it's divided by either — that would silently understate the
+    rate every time the subject has an unresolved rally mixed with tracked
+    ones, an independent failure mode from missing distance data itself."""
+    # steps under 2 m each (the teleport-guard threshold) so all of it counts
+    pos = pd.DataFrame({"t": [0.0, 0.5, 1.0], "x": [0.0, 1.5, 3.0],
+                        "y": [0.0, 0.0, 0.0], "frame": [0, 15, 30]})
+    rallies = [Rally(0, 0.0, 1.0), Rally(1, 10.0, 70.0)]  # rally 1: no position data
+    out = movement(pos, rallies)
+    assert out["rallies"] == 1
+    assert out["distance_m"] == pytest.approx(3.0)
+    # 3 m over the 1 s that actually produced it, not over 61 s of both rallies
+    assert out["metres_per_minute_in_play"] == pytest.approx(180.0)
 
 
 def test_back_row_attacks_in_front_of_the_line_are_counted_as_faults():
