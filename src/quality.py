@@ -79,8 +79,12 @@ def _fraction(num: int, den: int) -> float:
 MIN_PLAYERS_PER_SIDE = 4   # of six; below this the court is not all in frame
 
 
+MIN_CAMERA_SOLVED = 0.70   # share of processed frames the camera solver placed
+
+
 def assess(rallies, plays_by_rally: dict, subject_ids, audio_contacts: int,
-           subject_touches: int, players_per_side: dict | None = None) -> Quality:
+           subject_touches: int, players_per_side: dict | None = None,
+           calibration=None, camera=None) -> Quality:
     """Measure whether the pipeline actually got a grip on this match."""
     from metrics import ids_for
 
@@ -125,6 +129,44 @@ def assess(rallies, plays_by_rally: dict, subject_ids, audio_contacts: int,
               f"Only {subject_touches} of your own touches were found. There is "
               "not enough here to grade any skill."),
     ]
+
+    if camera is not None:
+        summary = camera.summary()
+        stats["camera"] = summary
+        solved = summary["solved_fraction"]
+        checks.append(Check(
+            "camera_solved", solved, MIN_CAMERA_SOLVED,
+            solved >= MIN_CAMERA_SOLVED,
+            f"The camera could only be located in {solved:.0%} of frames, so "
+            "positions for the rest were discarded. Handheld footage needs the "
+            "background to stay visible — keep the court and some of the wall in "
+            "shot, and avoid whipping the camera between ends."))
+        if summary["beyond_supported_motion"]:
+            checks.append(Check(
+                "camera_motion", summary["max_motion_px"], 0.0, False,
+                "The camera pans further than this analysis can follow. It "
+                "tracks drift and shake around one framing, not a camera "
+                "swinging between ends — put it on a tripod covering the whole "
+                "court."))
+
+    if calibration is not None:
+        stats["calibration"] = calibration.as_dict()
+        extrapolated = [name for name in calibration.region_extrapolation
+                        if not calibration.trusted(name)]
+        stats["extrapolated_regions"] = extrapolated
+        # Not a failure. A partial court is a supported way to record; what
+        # matters is that the report never presents a guessed region as measured,
+        # which `rating`/`metrics` handle per-region rather than by refusing
+        # everything.
+        endlines_missing = [r for r in extrapolated
+                            if r in ("far_court", "near_court")]
+        if endlines_missing:
+            checks.append(Check(
+                "endlines_visible", float(len(endlines_missing)), 0.0, False,
+                "An endline is out of frame, so the server standing behind it "
+                "cannot be seen. That is how this works out who won each rally, "
+                "so kills, errors and hitting percentage will mostly be "
+                "unscored. Everything not needing a rally result still stands."))
 
     if players_per_side is not None:
         # six a side: seeing far fewer than that on one half means the camera

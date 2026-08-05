@@ -173,7 +173,7 @@ class RallyTracks:
         if g is None or g.empty:
             return None
         i = (g["frame"] / self.fps - t).abs().to_numpy().argmin()
-        return calib.to_court(feet_px(g.iloc[[i]]))[0]
+        return calib.to_court(feet_px(g.iloc[[i]]), g["frame"].iloc[[i]])[0]
 
 
 def attribute_contact(t: float, ctx: "RallyTracks", calib,
@@ -207,7 +207,11 @@ def attribute_contact(t: float, ctx: "RallyTracks", calib,
         score = speed
         if reach is not None:
             pos = ctx.court_at(tid, t, calib)
-            if pos is None:
+            # NaN means the camera solver could not place this frame, so there is
+            # no court position to reason about. Skipping is the honest move: a
+            # NaN sails through `travelled > reach` as False and would otherwise
+            # be silently treated as reachable.
+            if pos is None or not np.isfinite(pos).all():
                 continue
             travelled = float(np.hypot(*(pos - prev_court)))
             if travelled > reach:
@@ -243,7 +247,13 @@ def contact_features(t: float, strength: float, ctx: "RallyTracks", calib,
     fps = ctx.fps
     frame = int(round(t * fps))
     near = g.iloc[(g["frame"] - frame).abs().to_numpy().argmin()]
-    court = calib.to_court(feet_px(pd.DataFrame([near])))[0]
+    court = calib.to_court(feet_px(pd.DataFrame([near])),
+                           [int(near["frame"])])[0]
+    # An unsolved camera frame gives NaN. Every court-derived feature below would
+    # be meaningless, and `side_of(nan)` in particular returns "near" without
+    # complaint — which would hand the rally decoder a fabricated possession.
+    if not np.isfinite(court).all():
+        return None
 
     hm = ctx.hands[tid]
     at = hm.iloc[(hm["frame"] - frame).abs().to_numpy().argmin()]

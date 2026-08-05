@@ -54,7 +54,7 @@ def _zones(subject: pd.DataFrame, calib, f0: int, f1: int) -> list[int]:
     win = subject[(subject["frame"] >= f0) & (subject["frame"] <= f1)]
     if win.empty:
         return []
-    pts = calib.to_court(feet_px(win))
+    pts = calib.to_court(feet_px(win), win["frame"])
     return [z for x, y in pts if on_court(x, y) and (z := zone_for(x, y)) is not None]
 
 

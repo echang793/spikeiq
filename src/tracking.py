@@ -273,7 +273,7 @@ def assign_sides(df: pd.DataFrame, calib: CourtCalibration) -> dict[int, str]:
     for tid, g in df.groupby("track_id"):
         if len(g) < MIN_TRACK_FRAMES:
             continue
-        pts = calib.to_court(feet_px(g))
+        pts = calib.to_court(feet_px(g), g["frame"])
         keep = np.array([on_court(x, y) for x, y in pts])
         if not keep.any():
             continue
@@ -334,7 +334,7 @@ def rally_segment(tracks: pd.DataFrame, rally, fps: float) -> pd.DataFrame:
 
 
 def _track_court_centre(g: pd.DataFrame, calib: CourtCalibration):
-    pts = calib.to_court(feet_px(g))
+    pts = calib.to_court(feet_px(g), g["frame"])
     keep = np.array([on_court(x, y) for x, y in pts])
     if not keep.any():
         return None
@@ -537,7 +537,7 @@ def subject_court_positions(df: pd.DataFrame, subject_id: int,
                             calib: CourtCalibration, fps: float) -> pd.DataFrame:
     """Subject's feet in court metres per frame, off-court points dropped."""
     sub = stitch_subject(df, subject_id)
-    pts = calib.to_court(feet_px(sub))
+    pts = calib.to_court(feet_px(sub), sub["frame"])
     out = pd.DataFrame({
         "frame": sub["frame"].to_numpy(),
         "t": sub["frame"].to_numpy() / fps,

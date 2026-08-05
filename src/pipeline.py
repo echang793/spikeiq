@@ -210,6 +210,7 @@ def analyze(sdir: Path) -> dict:
     """Everything downstream of calibration. Requires calibration.json and the
     subject click stored in meta.json."""
     import contacts as contacts_mod
+    import camera as camera_mod
     import grammar as grammar_mod
     import jump as jump_mod
     import metrics as metrics_mod
@@ -219,7 +220,7 @@ def analyze(sdir: Path) -> dict:
     import quality as quality_mod
     import rotation as rotation_mod
     import rallies as rallies_mod
-    from court import CourtCalibration
+    from court import CourtCalibration, CourtMapper
     from tracking import resolve_subject, run_tracking
 
     calib = CourtCalibration.load(sdir / "calibration.json")
@@ -232,10 +233,24 @@ def analyze(sdir: Path) -> dict:
     # kept on disk, so the decision is reversible
     rl = [r for r in all_rallies if r.index not in corrections.deleted]
 
-    # --- tracking (the expensive stage; cached in pixel space) --------------
+    # --- tracking + camera motion (the expensive stage; cached together) ----
+    # Camera solving rides the tracking decode via frame_cb, so it costs one
+    # extra pass over frames already in memory and never a second decode. Both
+    # artifacts are pixel-space and independent of the court fit, so both survive
+    # re-calibration — see DERIVED.
     tracks_path = sdir / "tracks.parquet"
+    camera_path = sdir / "camera.parquet"
     if tracks_path.exists():
         tracks = pd.read_parquet(tracks_path)
+        if camera_path.exists():
+            camera_track = camera_mod.CameraTrack.load(camera_path)
+        else:
+            # Sessions tracked before camera solving existed have no camera
+            # artifact. Re-tracking an hour of film to obtain one would be a poor
+            # trade: those sessions were shot to the fixed-tripod recording spec,
+            # so an identity track reproduces exactly the behaviour they were
+            # analysed under.
+            camera_track = camera_mod.CameraTrack.identity()
     else:
         set_status(sdir, "tracking", "running", progress=0.0)
         windows = [(r.start, r.end) for r in rl]
@@ -244,11 +259,24 @@ def analyze(sdir: Path) -> dict:
             set_status(sdir, "tracking", "running",
                        progress=done / total if total else 0.0)
 
+        solver = _camera_solver(sdir, fps)
+        frame_cb = None if solver is None else (
+            lambda idx, frame, boxes: solver.update(idx, frame, boxes))
         tracks = run_tracking(sdir / "video.mp4", tracks_path, MODELS,
-                              windows=windows, progress_cb=on_progress)
+                              windows=windows, progress_cb=on_progress,
+                              frame_cb=frame_cb)
+        camera_track = (solver.finish() if solver is not None
+                        else camera_mod.CameraTrack.identity())
+        camera_track.save(camera_path)
+    write_json(sdir, "camera.json", camera_track.summary())
+
     if tracks.empty:
         raise RuntimeError("no players were detected — check the calibration "
                            "frame actually shows the court")
+
+    # one object for both regimes: a fixed session gets an identity camera track,
+    # so nothing downstream needs to know which kind of footage this is
+    mapper = CourtMapper(calib, camera_track)
 
     # --- subject, resolved rally by rally ----------------------------------
     # NOT once for the match: the tracker hands the same player a different id
@@ -256,23 +284,23 @@ def analyze(sdir: Path) -> dict:
     set_status(sdir, "subject", "running")
     subject_id = _resolve_subject(tracks, meta, fps)
     seed_rally = _seed_rally_index(rl, meta, fps)
-    resolution = resolve_subject(tracks, rl, subject_id, seed_rally, calib, fps)
+    resolution = resolve_subject(tracks, rl, subject_id, seed_rally, mapper, fps)
     resolution = _apply_subject_corrections(resolution, corrections)
     subject_ids = resolution.ids_by_rally
     write_json(sdir, "subject_by_rally.json", resolution.as_dict())
 
     subject = _subject_frames(tracks, rl, subject_ids, fps)
     subject.to_parquet(sdir / "subject.parquet", index=False)
-    positions = _subject_positions(subject, calib, fps)
+    positions = _subject_positions(subject, mapper, fps)
 
     # --- rally bookkeeping: who served, and therefore who won ---------------
     set_status(sdir, "rotation", "running")
     for r in rl:
-        r.serving_side = rallies_mod.detect_serving_side(r, tracks, calib, fps)
+        r.serving_side = rallies_mod.detect_serving_side(r, tracks, mapper, fps)
     rallies_mod.assign_winners(rl)
     write_json(sdir, "rallies.json", [r.as_dict() for r in rl])
 
-    roles = rotation_mod.rally_roles(rl, tracks, subject_ids, calib, fps)
+    roles = rotation_mod.rally_roles(rl, tracks, subject_ids, mapper, fps)
     write_json(sdir, "rotation.json", {
         "per_rally": [r.as_dict() for r in roles],
         "summary": rotation_mod.summarise(roles),
@@ -287,7 +315,7 @@ def analyze(sdir: Path) -> dict:
     all_features = []
     for i, r in enumerate(rl):
         set_status(sdir, "contacts", "running", progress=(i + 1) / max(len(rl), 1))
-        feats = contacts_mod.rally_features(r, strengths, tracks, calib, fps)
+        feats = contacts_mod.rally_features(r, strengths, tracks, mapper, fps)
         all_features.extend(feats)
         decoded = grammar_mod.decode_rally(feats)
         plays_by_rally[r.index] = review_mod.apply_actions(
@@ -323,7 +351,9 @@ def analyze(sdir: Path) -> dict:
                            audio_contacts=len(strengths),
                            subject_touches=m["coverage"]["subject_touches"],
                            players_per_side=quality_mod.players_seen_per_side(
-                               tracks, calib))
+                               tracks, mapper),
+                           calibration=calib.quality,
+                           camera=camera_track)
     write_json(sdir, "quality.json", q.as_dict())
 
     r = rating_mod.estimate(m["overall"] | {"coverage": m["coverage"]},
@@ -398,12 +428,33 @@ def _subject_frames(tracks: pd.DataFrame, rallies, ids_by_rally: dict,
             .drop_duplicates("frame").reset_index(drop=True))
 
 
+def _camera_solver(sdir: Path, fps: float):
+    """A camera solver anchored on the calibration frame, or None.
+
+    Returns None only when the reference image is unavailable, in which case the
+    session is treated as fixed — the same behaviour as before this existed.
+    """
+    import cv2
+
+    import camera as camera_mod
+
+    frame_path = sdir / "frame0.jpg"
+    if not frame_path.exists():
+        return None
+    reference = cv2.imread(str(frame_path))
+    if reference is None:
+        return None
+    ref_t = (read_json(sdir, "calibration_frame.json", {}) or {}).get("t", 0.0)
+    return camera_mod.CameraSolver(reference,
+                                   reference_frame=int(float(ref_t) * fps))
+
+
 def _subject_positions(subject: pd.DataFrame, calib, fps: float) -> pd.DataFrame:
     from court import on_court
     from tracking import feet_px
     if subject.empty:
         return pd.DataFrame(columns=["frame", "t", "x", "y"])
-    pts = calib.to_court(feet_px(subject))
+    pts = calib.to_court(feet_px(subject), subject["frame"])
     out = pd.DataFrame({
         "frame": subject["frame"].to_numpy(),
         "t": subject["frame"].to_numpy() / fps,

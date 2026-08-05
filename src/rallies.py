@@ -146,7 +146,7 @@ def detect_serving_side(rally: Rally, tracks: pd.DataFrame, calib, fps: float,
     win = tracks[(tracks["frame"] >= f0) & (tracks["frame"] <= f1)]
     if win.empty:
         return None
-    pts = calib.to_court(feet_px(win))
+    pts = calib.to_court(feet_px(win), win["frame"])
     best_side, best_depth = None, 0.0
     for x, y in pts:
         if not on_court(x, y):
@@ -187,7 +187,7 @@ def subject_side(rally: Rally, subject: pd.DataFrame, calib, fps: float) -> str 
     win = subject[(subject["frame"] >= f0) & (subject["frame"] <= f1)]
     if win.empty:
         return None
-    pts = calib.to_court(feet_px(win))
+    pts = calib.to_court(feet_px(win), win["frame"])
     ys = np.array([y for x, y in pts if on_court(x, y)])
     if len(ys) == 0:
         return None
