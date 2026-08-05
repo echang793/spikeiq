@@ -114,7 +114,10 @@ async def upload(file: UploadFile, label: str = Form(""),
 # --- calibration -----------------------------------------------------------
 
 class Calibration(BaseModel):
-    corners: list[list[float]]
+    # the landmark form; `corners`/`attack` are the previous fixed-order shape and
+    # are still accepted so stored calibrations and older clients keep working
+    landmarks: dict[str, list[float]] | None = None
+    corners: list[list[float]] | None = None
     attack: list[list[float]] | None = None
     subject_click: list[float]
     subject_click_t: float | None = None
@@ -127,7 +130,13 @@ def calibrate(sid: str, body: Calibration):
 
     sdir = _sdir(sid)
     try:
-        calib = CourtCalibration(body.corners, body.attack)
+        if body.landmarks:
+            calib = CourtCalibration(body.landmarks)
+        elif body.corners:
+            calib = CourtCalibration(corners_px=body.corners,
+                                     attack_px=body.attack)
+        else:
+            raise ValueError("no court landmarks were given")
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     calib.save(sdir / "calibration.json")
@@ -150,6 +159,39 @@ def calibrate(sid: str, body: Calibration):
 
 
 # --- reading a session -----------------------------------------------------
+
+class DetectRequest(BaseModel):
+    inside_hint: list[float] | None = None
+
+
+@app.post("/api/session/{sid}/detect-court")
+def detect_court(sid: str, body: DetectRequest | None = None):
+    """Re-run auto court detection, optionally with a point inside the court.
+
+    One click inside the court is a cheap disambiguator and much stronger than
+    anything else available when several rectangles fit the floor about equally
+    well — worth offering before falling back to placing landmarks by hand.
+    """
+    sdir = _sdir(sid)
+    hint = tuple(body.inside_hint) if body and body.inside_hint else None
+    proposal = pipeline.propose_court(sdir, inside_hint=hint)
+    write_json(sdir, "court_proposal.json", proposal or {})
+    return {"proposal": proposal}
+
+
+@app.get("/api/court/landmarks")
+def court_landmarks():
+    """The landmark menu the calibration UI offers, with court coordinates so it
+    can draw the little diagram."""
+    from court import LANDMARK_LABELS, LANDMARKS, MIN_LANDMARKS
+
+    return {
+        "minimum": MIN_LANDMARKS,
+        "landmarks": [{"name": name, "court": list(LANDMARKS[name]),
+                       "label": LANDMARK_LABELS[name]}
+                      for name in LANDMARKS],
+    }
+
 
 @app.get("/api/sessions")
 def sessions():
@@ -180,6 +222,8 @@ def session(sid: str):
         "rallies_summary": read_json(sdir, "rallies_summary.json", {}),
         "rallies": read_json(sdir, "rallies.json", []),
         "calibration_frame": read_json(sdir, "calibration_frame.json", {}),
+        "court_proposal": read_json(sdir, "court_proposal.json", {}),
+        "camera": read_json(sdir, "camera.json", {}),
         "calibrated": (sdir / "calibration.json").exists(),
         "quality": read_json(sdir, "quality.json", {}),
         "subject_by_rally": read_json(sdir, "subject_by_rally.json", {}),

@@ -188,8 +188,47 @@ def prepare(sdir: Path) -> dict:
     extract_frame(sdir, t)
     write_json(sdir, "calibration_frame.json", {"t": round(t, 3)})
 
+    # propose a court, so calibration usually becomes "does that look right?"
+    # rather than eight clicks. Allowed to fail; failing is the normal fallback.
+    write_json(sdir, "court_proposal.json", propose_court(sdir) or {})
+
     set_status(sdir, "prepared", "done")
     return {"ingest": info, "rallies": summary}
+
+
+def propose_court(sdir: Path, inside_hint=None) -> dict | None:
+    """Auto-detect the court on the calibration frame, or return None.
+
+    Returning None is an ordinary outcome, not an error: a shallow angle, a worn
+    floor or players standing on the lines all end here, and the manual landmark
+    UI is the fallback. A wrong court accepted silently would be much worse than
+    no proposal, so this never lowers its own bar.
+    """
+    import cv2
+
+    import courtfind
+
+    frame_path = sdir / "frame0.jpg"
+    if not frame_path.exists():
+        return None
+    image = cv2.imread(str(frame_path))
+    if image is None:
+        return None
+    try:
+        proposal = courtfind.detect(image, inside_hint=inside_hint)
+    except cv2.error:
+        return None
+    if proposal is None:
+        return None
+    payload = proposal.as_dict()
+    try:
+        calib = proposal.calibration()
+    except ValueError:
+        # a proposal that will not fit is no proposal at all
+        return None
+    payload["quality"] = calib.quality.as_dict()
+    payload["model_lines_px"] = calib.model_lines_px()
+    return payload
 
 
 def load_rallies(sdir: Path) -> list:

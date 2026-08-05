@@ -97,6 +97,77 @@ def test_calibrate_stores_the_homography_and_the_click(client, clip):
     assert meta["height_m"] == 1.85
 
 
+def test_calibrate_accepts_landmarks(client, clip, calib):
+    """The new shape: any four or more named points."""
+    from conftest import px_for
+    from court import LANDMARKS
+
+    sid = upload(client, clip).json()["session"]
+    marks = {n: [float(v) for v in px_for(calib, *LANDMARKS[n])]
+             for n in ["corner_near_left", "corner_near_right",
+                       "attack_near_left", "attack_near_right",
+                       "centre_left", "centre_right"]}
+    r = client.post(f"/api/session/{sid}/calibrate", json={
+        "landmarks": marks, "subject_click": [800, 700]})
+    assert r.status_code == 200
+    saved = json.loads(
+        (pipeline.DATA / sid / "calibration.json").read_text())
+    assert set(saved["landmarks"]) == set(marks)
+    assert saved["quality"]["n_landmarks"] == 6
+
+
+def test_calibrate_still_accepts_the_old_corner_shape(client, clip):
+    """Older clients and stored calibrations must keep working."""
+    sid = upload(client, clip).json()["session"]
+    r = client.post(f"/api/session/{sid}/calibrate", json={
+        "corners": [[520, 300], [1180, 300], [1600, 940], [180, 940]],
+        "subject_click": [800, 700]})
+    assert r.status_code == 200
+
+
+def test_calibrate_refuses_too_few_landmarks(client, clip, calib):
+    from conftest import px_for
+    from court import LANDMARKS
+    sid = upload(client, clip).json()["session"]
+    marks = {n: [float(v) for v in px_for(calib, *LANDMARKS[n])]
+             for n in ["corner_near_left", "corner_near_right"]}
+    r = client.post(f"/api/session/{sid}/calibrate", json={
+        "landmarks": marks, "subject_click": [800, 700]})
+    assert r.status_code == 400
+    assert "at least" in r.json()["detail"]
+
+
+def test_calibrate_refuses_a_request_with_no_court_at_all(client, clip):
+    sid = upload(client, clip).json()["session"]
+    r = client.post(f"/api/session/{sid}/calibrate",
+                    json={"subject_click": [800, 700]})
+    assert r.status_code == 400
+
+
+def test_landmark_menu_is_served_for_the_picker(client):
+    body = client.get("/api/court/landmarks").json()
+    assert body["minimum"] == 4
+    assert len(body["landmarks"]) == 10
+    one = body["landmarks"][0]
+    assert set(one) == {"name", "court", "label"}
+    assert all(l["label"] for l in body["landmarks"])
+
+
+def test_detect_court_returns_nothing_without_a_frame(client, clip):
+    """Auto-detection failing is an ordinary outcome, not a 500."""
+    sid = upload(client, clip).json()["session"]
+    r = client.post(f"/api/session/{sid}/detect-court", json={})
+    assert r.status_code == 200
+    assert r.json()["proposal"] is None
+
+
+def test_session_payload_carries_the_proposal_and_camera(client, clip):
+    sid = upload(client, clip).json()["session"]
+    body = client.get(f"/api/session/{sid}").json()
+    assert "court_proposal" in body
+    assert "camera" in body
+
+
 def test_calibrate_rejects_degenerate_points(client, clip):
     sid = upload(client, clip).json()["session"]
     r = client.post(f"/api/session/{sid}/calibrate", json={

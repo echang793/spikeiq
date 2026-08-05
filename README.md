@@ -25,16 +25,34 @@ reference points and then yourself, and press Analyse.
 
 ## How to record
 
-The analysis quality is set at record time more than anywhere else.
+Recording well still helps most, but only one of these is actually required.
 
-- **Fixed tripod**, elevated corner behind the endline, ~3-4 m up. Do not pan.
-- **Whole court in frame**, including both endlines and the free zone behind
-  the serving line.
-- **1080p, 60 fps.** 60 helps contact timing and jump peaks; 30 works but is
-  blurrier at spike speed.
-- **Audio on and unobstructed.** Rallies are found from the referee's whistle
-  and the sound of the ball. Silent footage cannot be analysed at all.
-- **Same spot every match**, so calibration and cross-match trends compare.
+**Required:** audio on and unobstructed. Rallies are found from the referee's
+whistle and the sound of the ball, so silent footage cannot be analysed at all.
+
+**Strongly preferred, with the cost of each compromise:**
+
+| | Preferred | If you can't |
+|---|---|---|
+| Camera | Fixed tripod, elevated corner behind the endline, 3–4 m up | Handheld is supported. Drift and shake around one framing are tracked and removed; a camera swung between ends is not, and the report says so. Expect a few percent of frames to be dropped. |
+| Framing | Whole court, both endlines and the free zone | A cropped court is supported — click any four reference points you *can* see and the rest is extrapolated. But **an endline out of frame costs you hitting percentage**: the server standing behind it is how rally winners are worked out, so kills and errors go unscored. |
+| Resolution | 1080p, 60 fps | 30 fps works, blurrier at spike speed. |
+| Position | Same spot every match | Different spots still analyse; cross-match trends compare less cleanly. |
+
+## Calibrating
+
+After the rally scan, SpikeIQ tries to find the court itself and draws it over
+the frame. If it looks right, one click accepts it.
+
+When it can't — a shallow angle, a worn floor, players standing on the lines —
+you place points by hand: pick a reference point you can see from the list
+(corners, attack-line ends, centre-line ends) and click it on the frame. **Any
+four is enough**, and they do not have to be corners, which is what makes a
+partly visible court workable. The report tells you which parts of the court were
+measured and which were extrapolated.
+
+If several rectangles fit the floor markings, one click inside the court
+disambiguates it.
 
 ## How it works
 

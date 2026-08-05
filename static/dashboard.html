@@ -53,6 +53,9 @@
          border-radius: 50%; border: 2px solid #fff; background: var(--accent);
          font-size: 9px; color: #000; text-align: center; line-height: 10px; }
   .dot.me { background: var(--good); }
+  .dot.auto { background: var(--good); opacity: .9; }
+  #calibLines { position: absolute; left: 0; top: 0; pointer-events: none; }
+  .chip { font-size: 12px; padding: 5px 9px; }
   .hide { display: none; }
   ul.plain { list-style: none; padding: 0; margin: 0; }
   .alert { border: 1px solid var(--bad); border-left-width: 4px;
@@ -116,14 +119,27 @@
 
 <section id="calibPanel" class="hide">
   <h2>Calibrate</h2>
+  <div id="calibAuto" class="hide">
+    <p><strong>Is this the court?</strong>
+      <span class="muted" id="calibAutoQuality"></span></p>
+  </div>
   <p class="muted" id="calibPrompt"></p>
   <div id="calibWrap">
     <img id="calibImg" alt="first rally frame">
+    <svg id="calibLines"></svg>
   </div>
   <div class="row" style="margin-top:12px">
+    <button id="calibAccept" class="hide">Looks right</button>
+    <button id="calibManual" class="ghost hide">Place points myself</button>
+    <button id="calibHint" class="ghost hide">Click inside the court instead</button>
     <button id="calibUndo" class="ghost">Undo</button>
     <button id="calibReset" class="ghost">Start over</button>
     <button id="calibGo" disabled>Analyse</button>
+  </div>
+  <div id="calibPicker" class="hide" style="margin-top:14px">
+    <p class="muted">Pick a point you can see, then click it on the frame. Any
+      four is enough — the rest of the court is worked out from them.</p>
+    <div id="calibChips" class="row" style="gap:6px"></div>
   </div>
 </section>
 
@@ -164,17 +180,17 @@ const sign = v => v === null || v === undefined ? "—" : (v >= 0 ? "+" : "") + 
 const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + "s")}`;
 
 let current = null;
-let clicks = [];
 let subjectClick = null;
 
-// 8 court points, then yourself. Same click order each time so the homography
-// targets line up: far-left, far-right, near-right, near-left.
-const STEPS = [
-  "far-left court corner", "far-right court corner",
-  "near-right court corner", "near-left court corner",
-  "far-left attack line (where the 3 m line meets the sideline)",
-  "far-right attack line", "near-right attack line", "near-left attack line",
-];
+// Calibration is now "which points can you see", not a fixed click order, so a
+// court that runs off the edge of frame can still be located. Four is enough;
+// the homography extrapolates the rest.
+let placed = {};            // landmark name -> [x, y] in ORIGINAL image pixels
+let landmarkMenu = [];      // from /api/court/landmarks
+let activeLandmark = null;
+let calibMode = "auto";     // 'auto' | 'manual' | 'hint'
+let proposal = null;
+let calibMinimum = 4;
 
 $("uploadBtn").onclick = async () => {
   const f = $("file").files[0];
@@ -243,16 +259,41 @@ function render(s) {
 function show(id) { $(id).classList.remove("hide"); }
 function hide(id) { $(id).classList.add("hide"); }
 
-function showCalibration(s) {
+async function showCalibration(s) {
   show("calibPanel");
   hide("reportPanel");
-  clicks = []; subjectClick = null;
+  placed = {}; subjectClick = null; activeLandmark = null;
   $("calibImg").src = BASE + "/api/session/" + current + "/frame?t=" + Date.now();
-  drawDots();
+
+  if (!landmarkMenu.length) {
+    const menu = await (await api("/api/court/landmarks")).json();
+    landmarkMenu = menu.landmarks;
+    calibMinimum = menu.minimum;
+  }
+  renderChips();
+
+  proposal = (s.court_proposal && s.court_proposal.landmarks)
+    ? s.court_proposal : null;
+  calibMode = proposal ? "auto" : "manual";
+  if (proposal) placed = Object.assign({}, proposal.landmarks);
+  drawCalib();
+
   const r = s.rallies_summary || {};
   $("uploadNote").textContent =
-    `Found ${r.rally_count || 0} rallies across ${r.set_count || 0} set(s).`;
+    `Found ${plural(r.rally_count || 0, "rally", "rallies")} across `
+    + `${plural(r.set_count || 0, "set")}.`;
 }
+
+function renderChips() {
+  $("calibChips").innerHTML = landmarkMenu.map(l => `
+    <button class="ghost chip" data-name="${l.name}"
+            onclick="pickLandmark('${l.name}')">${esc(l.label)}</button>`).join("");
+}
+
+window.pickLandmark = name => {
+  activeLandmark = name;
+  drawCalib();
+};
 
 $("calibImg").onclick = e => {
   const img = $("calibImg");
@@ -262,54 +303,142 @@ $("calibImg").onclick = e => {
   const sx = img.naturalWidth / rect.width;
   const sy = img.naturalHeight / rect.height;
   const pt = [(e.clientX - rect.left) * sx, (e.clientY - rect.top) * sy];
-  if (clicks.length < STEPS.length) clicks.push(pt);
-  else subjectClick = pt;
-  drawDots();
+
+  if (calibMode === "hint") return sendHint(pt);
+  if (activeLandmark) {
+    placed[activeLandmark] = pt;
+    activeLandmark = null;
+  } else {
+    subjectClick = pt;
+  }
+  drawCalib();
 };
 
+async function sendHint(pt) {
+  calibMode = "auto";
+  $("calibPrompt").textContent = "Looking for the court around that point…";
+  const r = await (await api("/api/session/" + current + "/detect-court", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ inside_hint: pt }),
+  })).json();
+  proposal = r.proposal && r.proposal.landmarks ? r.proposal : null;
+  if (proposal) placed = Object.assign({}, proposal.landmarks);
+  else calibMode = "manual";
+  drawCalib();
+}
+
+$("calibAccept").onclick = () => { calibMode = "manual"; drawCalib(); };
+$("calibManual").onclick = () => {
+  calibMode = "manual"; proposal = null; placed = {}; drawCalib();
+};
+$("calibHint").onclick = () => {
+  calibMode = "hint";
+  $("calibPrompt").textContent = "Click any point inside the court.";
+  drawCalib();
+};
 $("calibUndo").onclick = () => {
-  if (subjectClick) subjectClick = null; else clicks.pop();
-  drawDots();
+  if (subjectClick) { subjectClick = null; }
+  else {
+    const names = Object.keys(placed);
+    if (names.length) delete placed[names[names.length - 1]];
+  }
+  drawCalib();
 };
-$("calibReset").onclick = () => { clicks = []; subjectClick = null; drawDots(); };
+$("calibReset").onclick = () => {
+  placed = {}; subjectClick = null; activeLandmark = null;
+  proposal = null; calibMode = "manual"; drawCalib();
+};
 
-function drawDots() {
+function drawCalib() {
   const wrap = $("calibWrap");
-  wrap.querySelectorAll(".dot").forEach(d => d.remove());
   const img = $("calibImg");
+  wrap.querySelectorAll(".dot").forEach(d => d.remove());
   const sx = img.clientWidth / (img.naturalWidth || 1);
   const sy = img.clientHeight / (img.naturalHeight || 1);
-  const place = (pt, cls, text) => {
+  const place = (pt, cls, text, title) => {
     const d = document.createElement("div");
     d.className = "dot " + cls;
     d.style.left = (pt[0] * sx) + "px";
     d.style.top = (pt[1] * sy) + "px";
     d.textContent = text;
+    if (title) d.title = title;
     wrap.appendChild(d);
   };
-  clicks.forEach((p, i) => place(p, "", i + 1));
-  if (subjectClick) place(subjectClick, "me", "★");
 
-  const done = clicks.length >= STEPS.length;
-  $("calibPrompt").textContent = !done
-    ? `Click the ${STEPS[clicks.length]} (${clicks.length + 1} of ${STEPS.length}).`
-    : (subjectClick ? "Ready — press Analyse."
-                    : "Now click yourself on the court.");
-  $("calibGo").disabled = !(done && subjectClick);
+  const names = Object.keys(placed);
+  names.forEach((n, i) => {
+    const label = (landmarkMenu.find(l => l.name === n) || {}).label || n;
+    place(placed[n], proposal ? "auto" : "", i + 1, label);
+  });
+  if (subjectClick) place(subjectClick, "me", "★", "you");
+
+  drawModelLines(sx, sy);
+
+  // the proposal is rendered over the frame precisely so a wrong fit is obvious
+  // at a glance, rather than something to discover later in the numbers
+  const isAuto = calibMode === "auto" && proposal;
+  $("calibAuto").classList.toggle("hide", !isAuto);
+  $("calibAccept").classList.toggle("hide", !isAuto);
+  $("calibManual").classList.toggle("hide", !isAuto);
+  $("calibHint").classList.toggle("hide", !!isAuto);
+  $("calibPicker").classList.toggle("hide", !!isAuto);
+  if (isAuto) {
+    const q = proposal.quality || {};
+    $("calibAutoQuality").textContent =
+      `fits ${pct(proposal.support)} of the court's lines; `
+      + `${pct(proposal.visible)} of the court is in frame`
+      + (q.region_extrapolation ? ` · ${extrapolationNote(q)}` : "");
+  }
+
+  const enough = names.length >= calibMinimum;
+  $("calibPrompt").textContent = calibMode === "hint"
+    ? "Click any point inside the court."
+    : activeLandmark
+      ? `Click the ${(landmarkMenu.find(l => l.name === activeLandmark) || {}).label}.`
+      : !enough
+        ? `Pick a point above, then click it. ${names.length} of ${calibMinimum} placed.`
+        : subjectClick ? "Ready — press Analyse."
+                       : "Now click yourself on the court.";
+  $("calibGo").disabled = !(enough && subjectClick);
+}
+
+function extrapolationNote(q) {
+  const guessed = Object.entries(q.region_extrapolation || {})
+    .filter(([, v]) => v > 0.35).map(([k]) => k.replace("_", " "));
+  return guessed.length ? `${guessed.join(", ")} extrapolated`
+                        : "whole court measured";
+}
+
+function drawModelLines(sx, sy) {
+  const svg = $("calibLines");
+  const img = $("calibImg");
+  svg.setAttribute("width", img.clientWidth);
+  svg.setAttribute("height", img.clientHeight);
+  const lines = (proposal && proposal.model_lines_px) || [];
+  svg.innerHTML = lines.map(([a, b]) =>
+    `<line x1="${a[0] * sx}" y1="${a[1] * sy}" x2="${b[0] * sx}"
+           y2="${b[1] * sy}" stroke="#46c78d" stroke-width="2"
+           stroke-opacity="0.85"/>`).join("");
 }
 
 $("calibGo").onclick = async () => {
   $("calibGo").disabled = true;
-  await api("/api/session/" + current + "/calibrate", {
+  const r = await api("/api/session/" + current + "/calibrate", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      corners: clicks.slice(0, 4),
-      attack: clicks.slice(4, 8),
+      landmarks: placed,
       subject_click: subjectClick,
       height_m: (parseFloat($("height").value) || 180) / 100,
     }),
   });
+  if (!r.ok) {
+    const detail = await r.json().catch(() => ({}));
+    $("calibPrompt").textContent = detail.detail || "That did not fit a court.";
+    $("calibGo").disabled = false;
+    return;
+  }
   hide("calibPanel");
   poll();
 };

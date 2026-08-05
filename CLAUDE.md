@@ -52,6 +52,24 @@ Module map: `court` (geometry/homography) → `tracking` (YOLO + stitch) →
 - **`quality.assess` gates the report.** Below threshold the level estimate is
   suppressed entirely. With no footage to validate against, being wrong quietly
   is the failure that matters.
+- **Calibration is any 4+ of 10 named floor landmarks** (`court.LANDMARKS`), not a
+  fixed click order. A homography extrapolates the rest of the court, so a partly
+  cropped court needs no extra machinery — only `CalibrationQuality` being honest
+  about which regions are measured vs extrapolated.
+- **Landmarks are floor-plane only.** Never add the net top (2.43 m up) or net
+  post bases (legal offset varies 0.5–1.0 m, so any assumed value is a silent
+  error).
+- **All court mapping goes through `CourtMapper.to_court(points, frames)`.**
+  `CourtCalibration.to_court` accepts and ignores `frames` so both satisfy one
+  interface; callers must never branch on the camera regime.
+- **Unsolved camera frames map to NaN** and are dropped by `on_court`. Never
+  substitute a stale warp. `contacts` checks `np.isfinite` explicitly because
+  `side_of(nan)` returns "near" without complaint.
+- **`camera.parquet` is NOT in `DERIVED`** — it is independent of the court fit,
+  so re-calibrating must not re-solve the camera. Sessions predating it load as
+  identity rather than being re-tracked.
+- **A session with a detected cut is never collapsed to `fixed`** — a cut means
+  the camera physically moved.
 - **`rating.RUBRIC` is the single tuning point.** Its anchors are informed
   guesses, NOT fitted to data — every output must keep saying so.
 - **`tracks.parquet` is pixel space** and survives re-calibration. Court-derived
@@ -72,6 +90,35 @@ Module map: `court` (geometry/homography) → `tracking` (YOLO + stitch) →
   for MPS and end up slower.
 - Never pass `half=True` to the YOLO tracker — the MPS fp16 fallback is ~27x
   slower (measured in the sibling dinkiq project).
+
+## Auto court detection (`courtfind.py`)
+
+Fits the whole court model and verifies it; never classifies lines. A gym floor
+carries basketball and badminton markings, and no line's appearance says which
+sport it belongs to — but a stray line cannot satisfy a 9×18 rectangle *and*
+attack lines at exactly 3 m *and* a centre line at 9 m at once.
+
+Four hard-won guards, each added after a wrong court scored ~1.0:
+
+1. **`distinct_lines`, not angular families.** "A court's lines form two
+   families" is true in the court plane and false in the image: under perspective
+   the sidelines converge and land tens of degrees apart, so taking the two
+   largest families kept five cross lines and one sideline.
+2. **`matches_convention`** — the court is symmetric under end-swap and
+   left-right mirror, so four homographies score a perfect 1.0 and three are
+   450–985 px wrong. Resolved geometrically from the documented convention
+   (near is lower in frame, x grows right), not by guessing.
+3. **`in_front_of_camera`** — a near-singular fit puts part of the court behind
+   the camera, where `perspectiveTransform` still returns plausible pixels. Seen
+   on real footage at 0.99 support with a self-intersecting sliver of a court.
+4. **Support is judged line by line, not sample by sample.** A gym is full of
+   edges; an oblique wrong pose can pass through them without ever lying *along*
+   a court line. `_line_is_on_a_marking` requires most of a line's length to run
+   along a marking, and `MIN_LINES_SUPPORTED` of the seven must qualify.
+
+Returning `None` is an ordinary outcome. Never lower the bar to produce a
+proposal — the manual landmark UI is the fallback, and the proposal is always
+rendered over the frame so a wrong fit is obvious before it is accepted.
 
 ## Performance (measured, `scripts/bench_tracking.py`, M1)
 
