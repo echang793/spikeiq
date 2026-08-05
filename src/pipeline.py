@@ -488,12 +488,12 @@ def _camera_solver(sdir: Path, fps: float):
                                    reference_frame=int(float(ref_t) * fps))
 
 
-def _subject_positions(subject: pd.DataFrame, calib, fps: float) -> pd.DataFrame:
+def _subject_positions(subject: pd.DataFrame, mapper, fps: float) -> pd.DataFrame:
     from court import on_court
     from tracking import feet_px
     if subject.empty:
         return pd.DataFrame(columns=["frame", "t", "x", "y"])
-    pts = calib.to_court(feet_px(subject), subject["frame"])
+    pts = mapper.to_court(feet_px(subject), subject["frame"])
     out = pd.DataFrame({
         "frame": subject["frame"].to_numpy(),
         "t": subject["frame"].to_numpy() / fps,

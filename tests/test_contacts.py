@@ -132,14 +132,14 @@ def test_attribute_contact_picks_the_player_whose_hands_move_fastest():
     for f in range(0, 20):
         rows.append(pose_row(f, 1, cx=400.0))                 # standing still
         rows.append(pose_row(f, 2, cx=800.0, wrist_dx=20.0 + 25.0 * f))  # swinging
-    tid, conf = attribute_contact(0.33, ctx_for(rows), calib=None)
+    tid, conf = attribute_contact(0.33, ctx_for(rows), mapper=None)
     assert tid == 2
     assert 0.0 < conf <= 1.0
 
 
 def test_attribute_contact_returns_none_when_nobody_is_tracked():
     rows = [pose_row(f, 1, cx=400.0) for f in range(5)]
-    assert attribute_contact(50.0, ctx_for(rows), calib=None)[0] is None
+    assert attribute_contact(50.0, ctx_for(rows), mapper=None)[0] is None
 
 
 def test_the_ball_cannot_reach_a_player_it_had_no_time_to_reach(calib):

@@ -168,15 +168,15 @@ class RallyTracks:
             return float("nan")
         return float(np.nanmax(speeds))
 
-    def court_at(self, tid: int, t: float, calib):
+    def court_at(self, tid: int, t: float, mapper):
         g = self.by_id.get(tid)
         if g is None or g.empty:
             return None
         i = (g["frame"] / self.fps - t).abs().to_numpy().argmin()
-        return calib.to_court(feet_px(g.iloc[[i]]), g["frame"].iloc[[i]])[0]
+        return mapper.to_court(feet_px(g.iloc[[i]]), g["frame"].iloc[[i]])[0]
 
 
-def attribute_contact(t: float, ctx: "RallyTracks", calib,
+def attribute_contact(t: float, ctx: "RallyTracks", mapper,
                       prev_court=None, prev_t: float | None = None
                       ) -> tuple[int | None, float]:
     """Who made the touch heard at time `t`, and how sure we are.
@@ -206,7 +206,7 @@ def attribute_contact(t: float, ctx: "RallyTracks", calib,
             continue
         score = speed
         if reach is not None:
-            pos = ctx.court_at(tid, t, calib)
+            pos = ctx.court_at(tid, t, mapper)
             # NaN means the camera solver could not place this frame, so there is
             # no court position to reason about. Skipping is the honest move: a
             # NaN sails through `travelled > reach` as False and would otherwise
@@ -233,11 +233,11 @@ def attribute_contact(t: float, ctx: "RallyTracks", calib,
     return best_id, confidence
 
 
-def contact_features(t: float, strength: float, ctx: "RallyTracks", calib,
+def contact_features(t: float, strength: float, ctx: "RallyTracks", mapper,
                      prev_court=None, prev_t: float | None = None
                      ) -> ContactFeatures | None:
     """Full feature row for one contact, or None if nobody can be attributed."""
-    tid, attribution = attribute_contact(t, ctx, calib, prev_court, prev_t)
+    tid, attribution = attribute_contact(t, ctx, mapper, prev_court, prev_t)
     if tid is None:
         return None
     g = ctx.by_id.get(tid)
@@ -247,8 +247,8 @@ def contact_features(t: float, strength: float, ctx: "RallyTracks", calib,
     fps = ctx.fps
     frame = int(round(t * fps))
     near = g.iloc[(g["frame"] - frame).abs().to_numpy().argmin()]
-    court = calib.to_court(feet_px(pd.DataFrame([near])),
-                           [int(near["frame"])])[0]
+    court = mapper.to_court(feet_px(pd.DataFrame([near])),
+                            [int(near["frame"])])[0]
     # An unsolved camera frame gives NaN. Every court-derived feature below would
     # be meaningless, and `side_of(nan)` in particular returns "near" without
     # complaint — which would hand the rally decoder a fabricated possession.
@@ -289,9 +289,12 @@ def contact_features(t: float, strength: float, ctx: "RallyTracks", calib,
     )
 
 
-def rally_features(rally, strengths: dict, tracks: pd.DataFrame, calib,
+def rally_features(rally, strengths: dict, tracks: pd.DataFrame, mapper,
                    fps: float) -> list[ContactFeatures]:
     """Every attributable contact in one rally, in order.
+
+    `mapper` is anything with a `to_court(points, frames)` method — a bare
+    `CourtCalibration` or a `CourtMapper`, whichever the session needs.
 
     Each contact is attributed using the previous one's court position, so the
     ball-flight constraint has something to work from. The chain starts
@@ -302,7 +305,7 @@ def rally_features(rally, strengths: dict, tracks: pd.DataFrame, calib,
     out: list[ContactFeatures] = []
     prev_court, prev_t = None, None
     for t in rally.contacts:
-        f = contact_features(t, strengths.get(round(t, 3), 0.5), ctx, calib,
+        f = contact_features(t, strengths.get(round(t, 3), 0.5), ctx, mapper,
                              prev_court, prev_t)
         if f is None:
             continue

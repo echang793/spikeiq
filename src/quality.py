@@ -184,7 +184,7 @@ def assess(rallies, plays_by_rally: dict, subject_ids, audio_contacts: int,
     return Quality(checks=checks, stats=stats)
 
 
-def players_seen_per_side(tracks, calib) -> dict:
+def players_seen_per_side(tracks, mapper) -> dict:
     """How many distinct player TRACKS were ever seen on each half.
 
     An over-count, not a headcount: `assign_sides` works on raw track ids and
@@ -194,7 +194,7 @@ def players_seen_per_side(tracks, calib) -> dict:
     prove the framing is good.
     """
     from tracking import assign_sides
-    sides = assign_sides(tracks, calib)
+    sides = assign_sides(tracks, mapper)
     counts = {"far": 0, "near": 0}
     for side in sides.values():
         counts[side] = counts.get(side, 0) + 1

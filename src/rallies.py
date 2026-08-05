@@ -131,9 +131,12 @@ def _mark_sets(rallies: list[Rally]) -> list[Rally]:
     return rallies
 
 
-def detect_serving_side(rally: Rally, tracks: pd.DataFrame, calib, fps: float,
+def detect_serving_side(rally: Rally, tracks: pd.DataFrame, mapper, fps: float,
                         search_s: float = SERVE_SEARCH_S) -> str | None:
     """Which side served, from who is standing behind their own endline.
+
+    `mapper` is anything with a `to_court(points, frames)` method — a bare
+    `CourtCalibration` or a `CourtMapper`, whichever the session needs.
 
     At the start whistle the server is the one player past their own endline;
     everyone else is inside the court. Returns None when nobody is clearly
@@ -146,7 +149,7 @@ def detect_serving_side(rally: Rally, tracks: pd.DataFrame, calib, fps: float,
     win = tracks[(tracks["frame"] >= f0) & (tracks["frame"] <= f1)]
     if win.empty:
         return None
-    pts = calib.to_court(feet_px(win), win["frame"])
+    pts = mapper.to_court(feet_px(win), win["frame"])
     best_side, best_depth = None, 0.0
     for x, y in pts:
         if not on_court(x, y):
@@ -176,7 +179,7 @@ def assign_winners(rallies: list[Rally]) -> list[Rally]:
     return rallies
 
 
-def subject_side(rally: Rally, subject: pd.DataFrame, calib, fps: float) -> str | None:
+def subject_side(rally: Rally, subject: pd.DataFrame, mapper, fps: float) -> str | None:
     """Which half the subject is playing on during a rally.
 
     Computed per rally from the subject's own tracked position rather than
@@ -187,7 +190,7 @@ def subject_side(rally: Rally, subject: pd.DataFrame, calib, fps: float) -> str 
     win = subject[(subject["frame"] >= f0) & (subject["frame"] <= f1)]
     if win.empty:
         return None
-    pts = calib.to_court(feet_px(win), win["frame"])
+    pts = mapper.to_court(feet_px(win), win["frame"])
     ys = np.array([y for x, y in pts if on_court(x, y)])
     if len(ys) == 0:
         return None

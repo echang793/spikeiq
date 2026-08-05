@@ -27,7 +27,7 @@ def test_subject_is_resolved_in_every_rally(calib, make_windowed_tracks,
     rally four, not just rally one."""
     tracks = make_windowed_tracks(match_rallies, moving_subject(match_rallies))
     got = resolve_subject_by_rally(tracks, match_rallies, seed_id=1,
-                                   seed_rally=0, calib=calib, fps=30.0)
+                                   seed_rally=0, mapper=calib, fps=30.0)
     assert set(got) == {r.index for r in match_rallies}
     assert all(ids for ids in got.values()), f"unresolved rallies: {got}"
 
@@ -42,7 +42,7 @@ def test_subject_follows_tracker_reid_between_rallies(calib, make_windowed_track
                  for i, r in enumerate(match_rallies)}
     tracks = make_windowed_tracks(match_rallies, positions)
     got = resolve_subject_by_rally(tracks, match_rallies, seed_id=1,
-                                   seed_rally=0, calib=calib, fps=30.0)
+                                   seed_rally=0, mapper=calib, fps=30.0)
     for i, r in enumerate(match_rallies):
         assert ids[i] in got[r.index], f"rally {r.index}: got {got[r.index]}"
 
@@ -55,7 +55,7 @@ def test_subject_is_never_matched_to_the_other_side_of_the_net(
     positions[2] = {77: (4.5, 5.0)}          # only an opponent visible
     tracks = make_windowed_tracks(match_rallies, positions)
     got = resolve_subject_by_rally(tracks, match_rallies, seed_id=1,
-                                   seed_rally=0, calib=calib, fps=30.0)
+                                   seed_rally=0, mapper=calib, fps=30.0)
     assert got[2] == set(), "adopted a player from the opposite half"
 
 
@@ -68,7 +68,7 @@ def test_unresolvable_rally_returns_empty_not_a_guess(calib, make_windowed_track
     positions[1] = {}                         # nobody tracked at all
     tracks = make_windowed_tracks(match_rallies, positions)
     got = resolve_subject_by_rally(tracks, match_rallies, seed_id=1,
-                                   seed_rally=0, calib=calib, fps=30.0)
+                                   seed_rally=0, mapper=calib, fps=30.0)
     assert got[1] == set()
     assert got[2], "a single missing rally must not end the chain"
 
@@ -82,7 +82,7 @@ def test_a_gap_does_not_terminate_the_chain(calib, make_windowed_tracks,
     positions[2] = {}
     tracks = make_windowed_tracks(match_rallies, positions)
     got = resolve_subject_by_rally(tracks, match_rallies, seed_id=1,
-                                   seed_rally=0, calib=calib, fps=30.0)
+                                   seed_rally=0, mapper=calib, fps=30.0)
     assert got[3], "chain died at the first gap instead of recovering"
 
 
@@ -93,7 +93,7 @@ def test_seed_rally_can_be_anywhere_in_the_match(calib, make_windowed_tracks,
     positions = moving_subject(match_rallies)
     tracks = make_windowed_tracks(match_rallies, positions)
     got = resolve_subject_by_rally(tracks, match_rallies, seed_id=1,
-                                   seed_rally=2, calib=calib, fps=30.0)
+                                   seed_rally=2, mapper=calib, fps=30.0)
     assert all(got[r.index] for r in match_rallies)
 
 
@@ -113,7 +113,7 @@ def test_within_a_rally_the_existing_stitching_still_applies(
         rows.append(tracks_frame(frame, tid, float(px), float(py) - 60.0, h=120.0))
     tracks = pd.DataFrame(rows, columns=COLUMNS)
     got = resolve_subject_by_rally(tracks, [rally], seed_id=1, seed_rally=0,
-                                   calib=calib, fps=30.0)
+                                   mapper=calib, fps=30.0)
     assert got[rally.index] == {1, 33}
 
 
@@ -239,5 +239,5 @@ def test_resolution_is_stable_whichever_id_seeds_it(calib, make_windowed_tracks,
     tracks = make_windowed_tracks(match_rallies, positions)
     seed_rally = ids.index(seed)
     got = resolve_subject_by_rally(tracks, match_rallies, seed_id=seed,
-                                   seed_rally=seed_rally, calib=calib, fps=30.0)
+                                   seed_rally=seed_rally, mapper=calib, fps=30.0)
     assert all(got[r.index] for r in match_rallies)

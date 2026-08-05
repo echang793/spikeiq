@@ -50,20 +50,24 @@ class RallyRole:
         }
 
 
-def _zones(subject: pd.DataFrame, calib, f0: int, f1: int) -> list[int]:
+def _zones(subject: pd.DataFrame, mapper, f0: int, f1: int) -> list[int]:
     win = subject[(subject["frame"] >= f0) & (subject["frame"] <= f1)]
     if win.empty:
         return []
-    pts = calib.to_court(feet_px(win), win["frame"])
+    pts = mapper.to_court(feet_px(win), win["frame"])
     return [z for x, y in pts if on_court(x, y) and (z := zone_for(x, y)) is not None]
 
 
-def rally_role(rally, subject: pd.DataFrame, calib, fps: float) -> RallyRole:
-    """The subject's rotational slot and playing position for one rally."""
+def rally_role(rally, subject: pd.DataFrame, mapper, fps: float) -> RallyRole:
+    """The subject's rotational slot and playing position for one rally.
+
+    `mapper` is anything with a `to_court(points, frames)` method — a bare
+    `CourtCalibration` or a `CourtMapper`, whichever the session needs.
+    """
     f_start = int(rally.start * fps)
-    serve_zones = _zones(subject, calib, f_start,
+    serve_zones = _zones(subject, mapper, f_start,
                          int((rally.start + SERVE_WINDOW_S) * fps))
-    play_zones = _zones(subject, calib, f_start, int(rally.end * fps))
+    play_zones = _zones(subject, mapper, f_start, int(rally.end * fps))
 
     serve_zone = Counter(serve_zones).most_common(1)[0][0] if serve_zones else None
     play_zone = Counter(play_zones).most_common(1)[0][0] if play_zones else None
@@ -84,7 +88,7 @@ def rally_role(rally, subject: pd.DataFrame, calib, fps: float) -> RallyRole:
 
 
 def rally_roles(rallies, tracks: pd.DataFrame, ids_by_rally: dict[int, set[int]],
-                calib, fps: float) -> list[RallyRole]:
+                mapper, fps: float) -> list[RallyRole]:
     """One role per rally, each read from that rally's own subject track ids.
 
     The ids differ from rally to rally — the tracker does not keep one id for a
@@ -95,7 +99,7 @@ def rally_roles(rallies, tracks: pd.DataFrame, ids_by_rally: dict[int, set[int]]
     for r in rallies:
         ids = ids_by_rally.get(r.index, set())
         seg = tracks[tracks["track_id"].isin(ids)] if ids else tracks.iloc[0:0]
-        out.append(rally_role(r, seg, calib, fps))
+        out.append(rally_role(r, seg, mapper, fps))
     return out
 
 

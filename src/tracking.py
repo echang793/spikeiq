@@ -260,8 +260,13 @@ def stitch_chain_ids(df: pd.DataFrame, first_id: int) -> set[int]:
 MIN_TRACK_FRAMES = 15
 
 
-def assign_sides(df: pd.DataFrame, calib: CourtCalibration) -> dict[int, str]:
+def assign_sides(df: pd.DataFrame, mapper) -> dict[int, str]:
     """Map each track id to the side of the net it plays on ('far' / 'near').
+
+    `mapper` is anything with a `to_court(points, frames)` method — a bare
+    `CourtCalibration` for a fixed camera, or a `CourtMapper` when the camera
+    moves. Callers pass whichever the session actually needs; nothing here
+    branches on which one it got.
 
     Replaces dinkiq's `pick_opponents`, which assumed at most two opponents. A
     track is assigned by majority vote over its on-court frames, so a defender
@@ -273,7 +278,7 @@ def assign_sides(df: pd.DataFrame, calib: CourtCalibration) -> dict[int, str]:
     for tid, g in df.groupby("track_id"):
         if len(g) < MIN_TRACK_FRAMES:
             continue
-        pts = calib.to_court(feet_px(g), g["frame"])
+        pts = mapper.to_court(feet_px(g), g["frame"])
         keep = np.array([on_court(x, y) for x, y in pts])
         if not keep.any():
             continue
@@ -333,8 +338,8 @@ def rally_segment(tracks: pd.DataFrame, rally, fps: float) -> pd.DataFrame:
     return tracks[(tracks["frame"] >= f0) & (tracks["frame"] <= f1)]
 
 
-def _track_court_centre(g: pd.DataFrame, calib: CourtCalibration):
-    pts = calib.to_court(feet_px(g), g["frame"])
+def _track_court_centre(g: pd.DataFrame, mapper):
+    pts = mapper.to_court(feet_px(g), g["frame"])
     keep = np.array([on_court(x, y) for x, y in pts])
     if not keep.any():
         return None
@@ -345,13 +350,13 @@ def _side_of(point) -> str:
     return "far" if point[1] < NET_Y else "near"
 
 
-def _candidates(seg: pd.DataFrame, calib: CourtCalibration,
+def _candidates(seg: pd.DataFrame, mapper,
                 anchor_side: str | None) -> dict[int, np.ndarray]:
     out: dict[int, np.ndarray] = {}
     for tid, g in seg.groupby("track_id"):
         if len(g) < MIN_RALLY_FRAMES:
             continue
-        centre = _track_court_centre(g, calib)
+        centre = _track_court_centre(g, mapper)
         if centre is None:
             continue
         # players do not swap ends mid-set, so an opponent is never him
@@ -362,7 +367,7 @@ def _candidates(seg: pd.DataFrame, calib: CourtCalibration,
 
 
 def resolve_subject(tracks: pd.DataFrame, rallies, seed_id: int, seed_rally: int,
-                    calib: CourtCalibration, fps: float) -> SubjectResolution:
+                    mapper, fps: float) -> SubjectResolution:
     """Follow the subject across every rally of the match.
 
     Two mechanisms, in order of trustworthiness:
@@ -423,14 +428,14 @@ def resolve_subject(tracks: pd.DataFrame, rallies, seed_id: int, seed_rally: int
                 conf[idx] = 0.9
                 method[idx] = "bridged"
             else:
-                picked, c = _nearest_candidate(seg, calib, cursor, cursor_side)
+                picked, c = _nearest_candidate(seg, mapper, cursor, cursor_side)
                 if picked is not None:
                     ids[idx] = _expand_within_rally(seg, {picked})
                     conf[idx] = c
                     method[idx] = "proximity"
             if ids[idx]:
                 centre = _track_court_centre(
-                    seg[seg["track_id"].isin(ids[idx])], calib)
+                    seg[seg["track_id"].isin(ids[idx])], mapper)
                 if centre is not None:
                     cursor = centre
                     cursor_side = _side_of(centre)
@@ -496,11 +501,11 @@ def _expand_within_rally(seg: pd.DataFrame, seed_ids: set[int]) -> set[int]:
     return out
 
 
-def _nearest_candidate(seg: pd.DataFrame, calib: CourtCalibration,
+def _nearest_candidate(seg: pd.DataFrame, mapper,
                        anchor, anchor_side) -> tuple[int | None, float]:
     if anchor is None or seg.empty:
         return None, 0.0
-    cands = _candidates(seg, calib, anchor_side)
+    cands = _candidates(seg, mapper, anchor_side)
     if not cands:
         return None, 0.0
     ranked = sorted(((float(np.hypot(*(c - anchor))), tid)
@@ -526,11 +531,11 @@ def _nearest_candidate(seg: pd.DataFrame, calib: CourtCalibration,
 
 
 def resolve_subject_by_rally(tracks: pd.DataFrame, rallies, seed_id: int,
-                             seed_rally: int, calib: CourtCalibration,
+                             seed_rally: int, mapper,
                              fps: float) -> dict[int, set[int]]:
     """Just the ids, for callers that do not need the confidence breakdown."""
     return resolve_subject(tracks, rallies, seed_id, seed_rally,
-                           calib, fps).ids_by_rally
+                           mapper, fps).ids_by_rally
 
 
 def subject_court_positions(df: pd.DataFrame, subject_id: int,
