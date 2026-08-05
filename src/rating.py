@@ -194,8 +194,14 @@ def strengths_and_weaknesses(rating: dict, n: int = 3) -> dict:
         return {"strengths": [], "weaknesses": []}
     mean = float(np.mean([d["level"] for d in dims.values()]))
     ranked = sorted(dims.items(), key=lambda kv: kv[1]["level"])
-    weak = [{"dimension": k, **v, "delta": round(v["level"] - mean, 2)}
-            for k, v in ranked[:n]]
-    strong = [{"dimension": k, **v, "delta": round(v["level"] - mean, 2)}
-              for k, v in reversed(ranked[-n:])]
+    # ranked[:n] and ranked[-n:] overlap whenever fewer than 2n dimensions are
+    # measured — routine, since a match without a block or a jump easily lands
+    # at 5-6 of the 8 possible dimensions. Capping keeps the two slices
+    # disjoint; the true middle dimension is then correctly left out of both
+    # rather than reported as simultaneously the player's best and worst skill.
+    k = min(n, len(ranked) // 2)
+    weak = [{"dimension": key, **v, "delta": round(v["level"] - mean, 2)}
+            for key, v in ranked[:k]]
+    strong = [{"dimension": key, **v, "delta": round(v["level"] - mean, 2)}
+              for key, v in reversed(ranked[len(ranked) - k:])] if k else []
     return {"strengths": strong, "weaknesses": weak, "own_average": round(mean, 2)}

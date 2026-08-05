@@ -114,6 +114,49 @@ def test_strengths_and_weaknesses_are_relative_to_the_player():
     assert sw["strengths"][0]["delta"] > 0 > sw["weaknesses"][0]["delta"]
 
 
+def test_strengths_and_weaknesses_never_share_a_dimension_with_few_measured():
+    """A match without a block or a jump easily lands at 4-5 of the 8 possible
+    dimensions, and the naive ranked[:3]/ranked[-3:] slices overlap below 6 —
+    the middle dimension must be left out of both, not double-counted."""
+    rating = {"dimensions": {
+        "attacking": {"level": 1.0, "label": "a", "low_sample": False, "weight": 1},
+        "passing": {"level": 2.0, "label": "b", "low_sample": False, "weight": 1},
+        "serving": {"level": 3.0, "label": "c", "low_sample": False, "weight": 1},
+        "defense": {"level": 4.0, "label": "d", "low_sample": False, "weight": 1},
+    }}
+    sw = strengths_and_weaknesses(rating)
+    weak_names = {d["dimension"] for d in sw["weaknesses"]}
+    strong_names = {d["dimension"] for d in sw["strengths"]}
+    assert not (weak_names & strong_names)
+    # k = min(3, 4 // 2) = 2: the two weakest and two strongest, no overlap
+    assert weak_names == {"attacking", "passing"}
+    assert strong_names == {"defense", "serving"}
+
+
+def test_strengths_and_weaknesses_exclude_the_true_middle_dimension():
+    """With an odd count the middle dimension is neither a clear strength nor a
+    clear weakness, and must be left out of both rather than assigned to one."""
+    rating = {"dimensions": {
+        "attacking": {"level": 1.0, "label": "a", "low_sample": False, "weight": 1},
+        "passing": {"level": 3.0, "label": "b", "low_sample": False, "weight": 1},
+        "serving": {"level": 5.0, "label": "c", "low_sample": False, "weight": 1},
+    }}
+    sw = strengths_and_weaknesses(rating)
+    assert [d["dimension"] for d in sw["weaknesses"]] == ["attacking"]
+    assert [d["dimension"] for d in sw["strengths"]] == ["serving"]
+
+
+def test_strengths_and_weaknesses_are_both_empty_with_one_dimension():
+    """With only one measured dimension there is no "relative to himself" to
+    report — better an honest empty list than calling the same skill both the
+    best and the worst."""
+    rating = {"dimensions": {
+        "attacking": {"level": 3.0, "label": "a", "low_sample": False, "weight": 1},
+    }}
+    sw = strengths_and_weaknesses(rating)
+    assert sw["strengths"] == [] and sw["weaknesses"] == []
+
+
 def test_tips_lead_with_what_to_work_on():
     r = estimate(metrics(hitting=-0.10), jumps={"best_m": 0.55, "count": 12})
     tips = tips_for(r, metrics(hitting=-0.10))
