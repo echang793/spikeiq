@@ -151,6 +151,10 @@ def test_landmark_menu_is_served_for_the_picker(client):
     one = body["landmarks"][0]
     assert set(one) == {"name", "court", "label"}
     assert all(l["label"] for l in body["landmarks"])
+    # the UI renders these as "Click the {label}.", so a label starting with a
+    # preposition reads as "Click the under the net, left sideline."
+    assert not any(l["label"].split()[0] in {"under", "on", "at", "by"}
+                   for l in body["landmarks"])
 
 
 def test_detect_court_returns_nothing_without_a_frame(client, clip):

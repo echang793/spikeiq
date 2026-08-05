@@ -263,7 +263,17 @@ async function showCalibration(s) {
   show("calibPanel");
   hide("reportPanel");
   placed = {}; subjectClick = null; activeLandmark = null;
-  $("calibImg").src = BASE + "/api/session/" + current + "/frame?t=" + Date.now();
+  const img = $("calibImg");
+  // redraw once the frame has real dimensions, and again if the pane is resized:
+  // every overlay position is a fraction of the displayed image size
+  img.onload = drawCalib;
+  if (!showCalibration._resizeBound) {
+    window.addEventListener("resize", () => {
+      if (!$("calibPanel").classList.contains("hide")) drawCalib();
+    });
+    showCalibration._resizeBound = true;
+  }
+  img.src = BASE + "/api/session/" + current + "/frame?t=" + Date.now();
 
   if (!landmarkMenu.length) {
     const menu = await (await api("/api/court/landmarks")).json();
@@ -354,8 +364,17 @@ function drawCalib() {
   const wrap = $("calibWrap");
   const img = $("calibImg");
   wrap.querySelectorAll(".dot").forEach(d => d.remove());
-  const sx = img.clientWidth / (img.naturalWidth || 1);
-  const sy = img.clientHeight / (img.naturalHeight || 1);
+
+  // Nothing can be positioned until the frame has real dimensions. Painting
+  // early makes the scale zero and stacks every line and dot in the corner —
+  // the same trap the review thumbnails hit. The load handler set in
+  // showCalibration redraws once the image is actually there.
+  if (!img.naturalWidth) {
+    updateCalibControls();
+    return;
+  }
+  const sx = img.clientWidth / img.naturalWidth;
+  const sy = img.clientHeight / img.naturalHeight;
   const place = (pt, cls, text, title) => {
     const d = document.createElement("div");
     d.className = "dot " + cls;
@@ -374,7 +393,10 @@ function drawCalib() {
   if (subjectClick) place(subjectClick, "me", "★", "you");
 
   drawModelLines(sx, sy);
+  updateCalibControls();
+}
 
+function updateCalibControls() {
   // the proposal is rendered over the frame precisely so a wrong fit is obvious
   // at a glance, rather than something to discover later in the numbers
   const isAuto = calibMode === "auto" && proposal;
@@ -391,13 +413,14 @@ function drawCalib() {
       + (q.region_extrapolation ? ` · ${extrapolationNote(q)}` : "");
   }
 
-  const enough = names.length >= calibMinimum;
+  const enough = Object.keys(placed).length >= calibMinimum;
   $("calibPrompt").textContent = calibMode === "hint"
     ? "Click any point inside the court."
     : activeLandmark
       ? `Click the ${(landmarkMenu.find(l => l.name === activeLandmark) || {}).label}.`
       : !enough
-        ? `Pick a point above, then click it. ${names.length} of ${calibMinimum} placed.`
+        ? `Pick a point above, then click it. `
+          + `${Object.keys(placed).length} of ${calibMinimum} placed.`
         : subjectClick ? "Ready — press Analyse."
                        : "Now click yourself on the court.";
   $("calibGo").disabled = !(enough && subjectClick);

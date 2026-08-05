@@ -151,6 +151,13 @@ rendered over the frame so a wrong fit is obvious before it is accepted.
   averaging drags midpoints toward the top-left corner.
 - Keep frontend URLs `BASE`-prefixed; without it a subpath mount loads the page
   but 404s every API call.
+- **Never position an overlay before its image has loaded.** Every overlay in the
+  dashboard (review subject boxes, calibration court lines and landmark dots) is
+  placed as a fraction of the *displayed* image size, so painting while
+  `naturalWidth` is 0 silently stacks everything in the top-left corner. This has
+  bitten twice — the review thumbnails and then the calibration panel. Guard on
+  `img.naturalWidth`, redraw from `img.onload`, and redraw on window resize.
+  `img.complete` is NOT a usable check: it is true for an image with no `src`.
 - UI copy: levels "resemble" a club band. Never present them as a placement.
 
 ## Related

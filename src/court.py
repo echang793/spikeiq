@@ -73,8 +73,9 @@ LANDMARK_LABELS: dict[str, str] = {
     "attack_far_right": "far attack line, right sideline",
     "attack_near_right": "near attack line, right sideline",
     "attack_near_left": "near attack line, left sideline",
-    "centre_left": "under the net, left sideline",
-    "centre_right": "under the net, right sideline",
+    # phrased to read correctly after "Click the ..." in the calibration prompt
+    "centre_left": "centre line, left sideline",
+    "centre_right": "centre line, right sideline",
 }
 
 # The click order the fixed 8-point UI used, kept so stored calibrations and
