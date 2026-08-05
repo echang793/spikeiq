@@ -128,6 +128,28 @@ def test_tips_flag_a_thin_sample_in_the_note_itself():
     assert any("Small sample" in t["note"] for t in tips)
 
 
+def test_tip_text_quotes_the_same_denominator_as_the_percentage_shown():
+    """'{value}' and '{attempts}' must describe the same population, or the
+    sentence contradicts its own numbers when recomputed."""
+    m = metrics(hitting=-0.10)
+    m["attacking"] = {"hitting_pct": -0.10, "attempts": 14, "kills": 3,
+                      "errors": 4, "unscored": 4, "low_sample": False}
+    r = estimate(m, jumps={"best_m": 0.55, "count": 12})
+    note = tips_for(r, m)[0]["note"]
+    assert "on 10 swings" in note      # 14 attempts - 4 unscored = 10 graded
+    assert "on 14 swings" not in note
+
+
+def test_per_role_note_swing_count_excludes_unscored_touches():
+    by_role = {"outside hitter": {
+        "rallies": 20,
+        "attacking": {"hitting_pct": 0.21, "attempts": 18, "unscored": 3},
+    }}
+    note = per_role_notes(by_role)[0]["note"]
+    assert "15 swings" in note
+    assert "18 swings" not in note
+
+
 def test_per_role_notes_refuse_to_judge_a_thin_position():
     by_role = {"outside hitter": {"rallies": 2, "attacking": {"hitting_pct": 1.0,
                                                               "attempts": 1}}}
@@ -175,6 +197,77 @@ def test_examples_ignore_other_players_mistakes():
     got = example_rallies("attacking", [Rally(0, 0.0, 5.0, winner="far")],
                           plays, {1})
     assert got == []
+
+
+def test_examples_do_not_flag_a_block_that_kept_the_ball_alive():
+    """A block with more contacts after it is 'touch', an ordinary and often
+    good outcome, not a demonstrated blocking failure."""
+    from feedback import example_rallies
+    from rallies import Rally
+
+    def play(action, track_id=1, side="near"):
+        return {"t": 1.0, "action": action, "track_id": track_id, "side": side,
+                "zone": 4, "x": 4.5, "y": 10.0, "airborne": 0.0,
+                "confidence": 0.8, "touch_index": 1}
+
+    plays = {0: [play("attack", track_id=2, side="far"),
+                play("block", track_id=1, side="near"),
+                play("dig", track_id=2, side="far"),
+                play("set", track_id=2, side="far")]}
+    got = example_rallies("blocking", [Rally(0, 0.0, 5.0, winner="far")],
+                          plays, {1})
+    assert got == []
+
+
+def test_examples_flag_a_block_that_was_actually_scored_against():
+    from feedback import example_rallies
+    from rallies import Rally
+
+    def play(action, track_id=1, side="near"):
+        return {"t": 1.0, "action": action, "track_id": track_id, "side": side,
+                "zone": 4, "x": 4.5, "y": 10.0, "airborne": 0.0,
+                "confidence": 0.8, "touch_index": 1}
+
+    plays = {0: [play("attack", track_id=2, side="far"),
+                play("block", track_id=1, side="near")]}
+    got = example_rallies("blocking", [Rally(0, 0.0, 5.0, winner="far")],
+                          plays, {1})
+    assert got == [0]
+
+
+def test_examples_do_not_flag_a_set_whose_fed_attack_never_resolved():
+    """The last rally of a set has no winner to read — a set that fed an
+    attack we can't score has demonstrated nothing, good or bad."""
+    from feedback import example_rallies
+    from rallies import Rally
+
+    def play(action, track_id=1, side="near"):
+        return {"t": 1.0, "action": action, "track_id": track_id, "side": side,
+                "zone": 4, "x": 4.5, "y": 10.0, "airborne": 0.0,
+                "confidence": 0.8, "touch_index": 1}
+
+    plays = {0: [play("pass", track_id=2), play("set", track_id=1),
+                play("attack", track_id=2)]}
+    got = example_rallies("setting", [Rally(0, 0.0, 5.0, winner=None)],
+                          plays, {1})
+    assert got == []
+
+
+def test_examples_flag_a_set_that_definitely_did_not_lead_to_a_kill():
+    from feedback import example_rallies
+    from rallies import Rally
+
+    def play(action, track_id=1, side="near"):
+        return {"t": 1.0, "action": action, "track_id": track_id, "side": side,
+                "zone": 4, "x": 4.5, "y": 10.0, "airborne": 0.0,
+                "confidence": 0.8, "touch_index": 1}
+
+    plays = {0: [play("pass", track_id=2), play("set", track_id=1),
+                play("attack", track_id=2), play("block", track_id=99,
+                                                 side="far")]}
+    got = example_rallies("setting", [Rally(0, 0.0, 5.0, winner="near")],
+                          plays, {1})
+    assert got == [0]
 
 
 def test_build_attaches_examples_only_to_what_to_work_on():

@@ -89,9 +89,17 @@ LOW_LEVEL = 2.5   # below this a dimension gets the corrective note
 def _fill(template: str, dim: dict, metrics: dict, name: str) -> str:
     group = RUBRIC[name]["path"][0]
     stats = (metrics.get(group) or {}) if group != "__jumps__" else {}
+    # `{attempts}` has to match the denominator behind `{value}`, or the
+    # sentence contradicts its own numbers: "hit +0.100 (3 kills, 2 errors on
+    # 14 swings)" when 14 includes unresolved-winner swings recomputes to
+    # (3-2)/14 = 0.071, not 0.100. `attempts` minus `unscored` is exactly the
+    # graded count the percentage was actually computed from; groups with no
+    # unscored/unknown split (defense) are untouched by the .get default.
+    graded_attempts = (stats.get("attempts", stats.get("digs", 0))
+                       - stats.get("unscored", 0))
     fields = {
         "value": dim["value"],
-        "attempts": stats.get("attempts", stats.get("digs", 0)),
+        "attempts": graded_attempts,
         "kills": stats.get("kills", 0),
         "errors": stats.get("errors", 0),
         "shank_pct": stats.get("shank_pct") or 0.0,
@@ -149,7 +157,10 @@ def per_role_notes(by_role: dict, min_rallies: int = 6) -> list[dict]:
         pas = stats.get("passing", {})
         parts = []
         if atk.get("hitting_pct") is not None:
-            parts.append(f"hit {atk['hitting_pct']:+.3f} on {atk['attempts']} swings")
+            # graded attempts, matching hitting_pct's own denominator — same
+            # reasoning as _fill() above
+            graded = atk.get("attempts", 0) - atk.get("unscored", 0)
+            parts.append(f"hit {atk['hitting_pct']:+.3f} on {graded} swings")
         if pas.get("rating") is not None:
             parts.append(f"passed {pas['rating']:.2f}")
         blk = stats.get("blocking", {})
@@ -176,7 +187,7 @@ def example_rallies(dimension: str, rallies, plays_by_rally: dict,
     a clip of somebody else's error teaches nothing.
     """
     from metrics import (attack_outcome, block_outcome, dig_converted,
-                         ids_for, pass_rating, serve_outcome, set_is_assist)
+                         ids_for, pass_rating, serve_outcome, set_fed_outcome)
 
     hits: list[tuple[float, int]] = []
     for rally in rallies:
@@ -197,13 +208,19 @@ def example_rallies(dimension: str, rallies, plays_by_rally: dict,
                 if serve_outcome(plays, i, rally.winner) == "error":
                     rank = 0.0
             elif dimension == "blocking" and action == "block":
-                if block_outcome(plays, i, rally.winner) != "stuff":
+                # `!= "stuff"` also flagged "touch" — a block that kept the
+                # ball alive, an ordinary and often good outcome — as a
+                # demonstrated failure. Only "error" actually is one.
+                if block_outcome(plays, i, rally.winner) == "error":
                     rank = 0.0
             elif dimension == "defense" and action == "dig":
                 if not dig_converted(plays, i):
                     rank = 0.0
             elif dimension == "setting" and action == "set":
-                if not set_is_assist(plays, i, rally.winner):
+                # skip "unknown": a set whose fed attack's own outcome never
+                # resolved hasn't demonstrated anything, good or bad
+                fed = set_fed_outcome(plays, i, rally.winner)
+                if fed not in ("kill", "unknown"):
                     rank = 0.0
             if rank is not None:
                 hits.append((rank, rally.index))
